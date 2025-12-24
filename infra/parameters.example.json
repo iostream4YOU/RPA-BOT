@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": { "value": "prod" },
+    "location": { "value": "eastus" },
+    "containerAppName": { "value": "auditorbot-api" },
+    "containerAppsEnvironmentName": { "value": "auditorbot-env" },
+    "schedulerJobName": { "value": "auditorbot-batch" },
+    "containerImage": { "value": "ghcr.io/<owner>/<repo>:latest" },
+    "containerRegistryServer": { "value": "ghcr.io" },
+    "containerRegistryUsername": { "value": "<github-username>" },
+    "containerRegistryPassword": { "value": "<personal-access-token>" },
+    "logAnalyticsWorkspaceName": { "value": "auditorbot-law" },
+    "storageAccountName": { "value": "auditorbotstore" },
+    "storageEnableHns": { "value": false },
+    "keyVaultName": { "value": "auditorbot-kv" },
+    "administratorObjectId": { "value": "<aad-object-id-with-kv-permissions>" },
+    "postgresServerName": { "value": "auditorbot-pg" },
+    "postgresAdministratorLogin": { "value": "auditoradmin" },
+    "postgresAdministratorPassword": { "value": "<strong-password>" },
+    "postgresDatabaseName": { "value": "auditor" },
+    "auditApiKey": { "value": "<api-key-used-by-ci-and-schedulers>" },
+    "alertWebhookUrl": { "value": "https://hooks.slack.com/services/..." },
+    "summaryWebhookUrl": { "value": "https://hooks.slack.com/services/..." },
+    "emailPassword": { "value": "<smtp-password>" },
+    "googleCredentialsJson": { "value": "{\"type\":\"service_account\",...}" },
+    "appEnvironment": { "value": "production" },
+    "appLogLevel": { "value": "INFO" },
+    "jobCronExpression": { "value": "0 9 * * *" },
+    "tags": {
+      "value": {
+        "Owner": "platform-team",
+        "CostCenter": "fin-audit"
+      }
+    }
+  }
+}

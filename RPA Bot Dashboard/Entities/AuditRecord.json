@@ -1,0 +1,55 @@
+{
+  "name": "AuditRecord",
+  "type": "object",
+  "properties": {
+    "analysis_date": {
+      "type": "string",
+      "format": "date",
+      "description": "Date of the audit analysis"
+    },
+    "ehr": {
+      "type": "string",
+      "enum": [
+        "Axxess",
+        "Kinnser",
+        "Kantime",
+        "HCHB",
+        "Athena",
+        "eCW",
+        "Elation",
+        "Interlink",
+        "Automedsys"
+      ],
+      "description": "EHR System Name"
+    },
+    "agency": {
+      "type": "string",
+      "description": "Name of the agency"
+    },
+    "success_rate": {
+      "type": "number",
+      "description": "Success rate percentage (0-100)"
+    },
+    "failure_rate": {
+      "type": "number",
+      "description": "Failure rate percentage (0-100)"
+    },
+    "orders_to_be_uploaded": {
+      "type": "integer",
+      "description": "Total orders analyzed"
+    },
+    "orders_uploaded": {
+      "type": "integer",
+      "description": "Total orders successfully uploaded"
+    },
+    "most_frequent_remark": {
+      "type": "string",
+      "description": "Top failure reason/remark"
+    }
+  },
+  "required": [
+    "analysis_date",
+    "ehr",
+    "agency"
+  ]
+}

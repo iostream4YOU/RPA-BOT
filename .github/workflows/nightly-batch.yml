@@ -1,0 +1,40 @@
+name: nightly-batch
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    name: Invoke Batch Endpoint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate inputs
+        run: |
+          if [ -z "${{ secrets.AUDITOR_API_ENDPOINT }}" ]; then
+            echo "AUDITOR_API_ENDPOINT secret is required"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AUDITOR_API_KEY }}" ]; then
+            echo "AUDITOR_API_KEY secret is required"
+            exit 1
+          fi
+
+      - name: Trigger batch run
+        env:
+          ENDPOINT: ${{ secrets.AUDITOR_API_ENDPOINT }}
+          API_KEY: ${{ secrets.AUDITOR_API_KEY }}
+        run: |
+          PAYLOAD='{"background": true}'
+          RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "$ENDPOINT/batch-audit" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $API_KEY" \
+            -d "$PAYLOAD")
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          echo "Response status: $STATUS"
+          echo "Response body: $BODY"
+          if [ "$STATUS" -ge 400 ]; then
+            exit 1
+          fi
