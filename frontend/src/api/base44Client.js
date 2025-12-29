@@ -29,7 +29,14 @@ export const base44Client = {
     try {
       // Add timestamp to prevent caching
       const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/audit-history?limit=100&t=${Date.now()}`);
+      const response = await fetch(
+        `${backendUrl.replace(/\/$/, '')}/audit-history?limit=100&t=${Date.now()}`,
+        {
+          headers: {
+            'ngrok-skip-browser-warning': 'true'
+          }
+        }
+      );
       if (!response.ok) throw new Error('Network response was not ok');
       const data = await response.json();
       
