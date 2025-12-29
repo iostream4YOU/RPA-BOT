@@ -49,6 +49,10 @@ class Settings(BaseSettings):
 		default_factory=list,
 		description="Default Drive folder IDs processed by the scheduler.",
 	)
+	default_audit_folder_id: Optional[str] = Field(
+		None,
+		description="Default Google Drive folder ID for /audit-agency-data endpoint.",
+	)
 
 	class Config:
 		env_file = ".env"

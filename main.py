@@ -16,6 +16,7 @@ import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -131,9 +132,24 @@ app = FastAPI(title="Auditor Bot", version=settings.app_version)
 instrumentator = Instrumentator(should_group_status_codes=True, excluded_handlers=["/metrics"])
 instrumentator.instrument(app).expose(app, include_in_schema=False)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://rpa-bot-1.vercel.app",
+        "https://9f3bdf6c59b4.ngrok-free.app"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class AuditRequest(BaseModel):
-    folder_id: str = Field(..., description="Google Drive folder ID to audit.")
+    folder_id: str = Field(
+        default="14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ",
+        description="Google Drive folder ID to audit.",
+        example="14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ"
+    )
 
 
 class BatchAuditRequest(BaseModel):
@@ -632,7 +648,7 @@ def send_alerts(results: List[Dict[str, object]], threshold: Optional[float] = N
             {
                 "agency": result["agency"],
                 "file_name": result["file_name"],
-                "failure_rate": result["stats"]["failure_rate"], failure_rate
+                "failure_rate": result["stats"]["failure_rate"],
                 "unique_failure_reasons": result["unique_failure_reasons"],
             }
             for result in high_failures
@@ -723,7 +739,7 @@ def build_email_content(
     paired_results: Optional[List[Dict[str, object]]] = None,
 ) -> Tuple[str, str]:
     text_lines = [
-        f"RPA Auditor Summary - {audit_timestamp}", {audit_timestamp}
+        f"RPA Auditor Summary - {audit_timestamp}",
         "",
     ]
 
@@ -758,7 +774,7 @@ def build_email_content(
                 </div>
                 <div style="flex:1;min-width:120px;background:#fef2f2;border-radius:8px;padding:12px;">
                     <div style="font-size:11px;color:#b91c1c;text-transform:uppercase;">Failure</div>
-                    <div style="font-size:20px;font-weight:700;color:#991b1b;">{stats['failure_rate']}</div>
+                    <div style="font-size:20px;font-weight:700;color=#991b1b;">{stats['failure_rate']}</div>
                 </div>
                 <div style="flex:1;min-width:120px;background:#eef2ff;border-radius:8px;padding:12px;">
                     <div style="font-size:11px;color:#4338ca;text-transform:uppercase;">Signed vs Pending</div>
@@ -1038,7 +1054,10 @@ def run_batch_audit(folder_ids: List[str], alert_threshold: Optional[float] = No
 
 @app.post("/audit-agency-data")
 def audit_agency_data(request: AuditRequest):
-    return run_audit(request.folder_id)
+    folder_id = request.folder_id or "14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ"
+    if not folder_id:
+        raise HTTPException(status_code=400, detail="No folder ID provided.")
+    return run_audit(folder_id)
 
 
 @app.post("/batch-audit")
