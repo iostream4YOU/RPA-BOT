@@ -50,7 +50,8 @@ export default function AuditTable({ data }) {
             <TableHead>EHR System</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Date</TableHead>
-            <TableHead>Remarks</TableHead>
+            <TableHead>Success</TableHead>
+            <TableHead>Failure</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -76,9 +77,8 @@ export default function AuditTable({ data }) {
               <TableCell>
                 {audit.date ? format(new Date(audit.date), 'MMM dd, yyyy HH:mm') : '-'}
               </TableCell>
-              <TableCell className="max-w-[200px] truncate" title={audit.remarks}>
-                {audit.remarks}
-              </TableCell>
+              <TableCell>{audit.successCount ?? 0}</TableCell>
+              <TableCell>{audit.failureCount ?? 0}</TableCell>
               <TableCell className="text-right">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>

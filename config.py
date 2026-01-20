@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import Field, validator
+from pydantic import AliasChoices, Field, validator
 from pydantic_settings import BaseSettings
 
 
@@ -28,6 +28,16 @@ class Settings(BaseSettings):
 	database_url: str = Field(
 		"sqlite:///./audit_history.db",
 		description="SQLAlchemy database URL (sqlite:///./audit_history.db, postgres://, etc.)",
+	)
+	firebase_credentials_path: str = Field(
+		"firebase-service-account.json",
+		description="Absolute path to the Firebase service-account JSON file.",
+		validation_alias=AliasChoices("FIREBASE_CREDENTIALS", "FIREBASE_CREDENTIALS_PATH"),
+	)
+	firebase_project_id: Optional[str] = Field(
+		None,
+		description="Firebase/Google Cloud project ID.",
+		validation_alias=AliasChoices("FIREBASE_PROJECT_ID", "FIREBASE_PROJECT"),
 	)
 
 	# Notifications

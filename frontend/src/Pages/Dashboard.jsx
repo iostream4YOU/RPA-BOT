@@ -31,7 +31,8 @@ export default function Dashboard() {
     return data.recentAudits.filter(audit => {
       const matchesSearch = 
         audit.id.toString().includes(filters.search) ||
-        (audit.remarks && audit.remarks.toLowerCase().includes(filters.search.toLowerCase()));
+        audit.agency.toLowerCase().includes(filters.search.toLowerCase()) ||
+        audit.ehr.toLowerCase().includes(filters.search.toLowerCase());
       
       const matchesStatus = 
         !filters.status || filters.status === 'all' || 

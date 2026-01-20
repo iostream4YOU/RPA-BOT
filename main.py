@@ -4,7 +4,7 @@ import os
 import re
 import smtplib
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from functools import lru_cache
 from time import perf_counter
@@ -13,7 +13,9 @@ from uuid import uuid4
 
 import httpx
 import pandas as pd
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+import firebase_admin
+from firebase_admin import credentials as fb_credentials, firestore
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +65,8 @@ EMAIL_SMTP_RECIPIENTS = [
 ]
 EMAIL_SMTP_USE_TLS = settings.audit_email_use_tls
 DEFAULT_BATCH_FOLDER_IDS = settings.batch_folder_ids
+FIREBASE_CREDENTIALS_PATH = settings.firebase_credentials_path
+FIREBASE_PROJECT_ID = settings.firebase_project_id
 
 DRIVE_RETRY_CONFIG = {
     "stop": stop_after_attempt(5),
@@ -74,6 +78,9 @@ WEBHOOK_RETRY_CONFIG = {
     "wait": wait_exponential(multiplier=1, min=1, max=4),
     "reraise": True,
 }
+
+firestore_app = None
+firestore_client: Optional[firestore.Client] = None
 
 
 def _get_or_create_metric(name: str, factory: Callable[[], object]):
@@ -162,7 +169,82 @@ class BatchAuditRequest(BaseModel):
     )
 
 
+class RunOrder(BaseModel):
+    order_id: Optional[str] = Field(None, description="Order identifier if available.")
+    status: str = Field(..., pattern=r"^(signed|unsigned)$", description="Order status.")
+    reason: Optional[str] = Field(None, description="Failure or remark reason.")
+    ehr: Optional[str] = Field(None, description="EHR name if known.")
+    agency: Optional[str] = Field(None, description="Agency name if known.")
+    received_at: Optional[datetime] = None
+    processed_at: Optional[datetime] = None
+
+
+class RunIngestRequest(BaseModel):
+    bot_id: str
+    orders_total: int = Field(..., ge=0)
+    orders_processed: int = Field(..., ge=0)
+    success_rate: Optional[float] = Field(None, ge=0, le=100)
+    remark: Optional[str] = Field(None, description="Common remark / reason")
+    orders: Optional[List[RunOrder]] = Field(None, description="Optional per-order details.")
+
+
 history_repository = AuditHistoryRepository()
+
+
+def init_firestore() -> Optional[firestore.Client]:
+    """Initialize and cache Firestore client. Returns None if credentials are missing."""
+    global firestore_client
+    if firestore_client is not None:
+        return firestore_client
+
+    if not os.path.exists(FIREBASE_CREDENTIALS_PATH):
+        logger.warning("Firebase credentials not found at {}. Skipping Firestore init.", FIREBASE_CREDENTIALS_PATH)
+        return None
+
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        cred = fb_credentials.Certificate(FIREBASE_CREDENTIALS_PATH)
+        init_kwargs = {"projectId": FIREBASE_PROJECT_ID} if FIREBASE_PROJECT_ID else None
+        firebase_admin.initialize_app(cred, init_kwargs)
+
+    firestore_client = firestore.client()
+    return firestore_client
+
+
+def get_firestore_or_503() -> firestore.Client:
+    client = init_firestore()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Firestore is not configured or credentials missing.")
+    return client
+
+
+def verify_bot_api_key(client: firestore.Client, bot_id: str, api_key: Optional[str]) -> Dict[str, object]:
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API key.")
+
+    doc = client.collection("bots").document(bot_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=401, detail="Unknown bot_id or inactive bot.")
+
+    data = doc.to_dict() or {}
+    if data.get("active") is False:
+        raise HTTPException(status_code=403, detail="Bot is disabled.")
+
+    stored_key = data.get("api_key") or data.get("api_key_plain")
+    if not stored_key or stored_key != api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key.")
+
+    return data
+
+
+def _serialize_run_doc(doc) -> Dict[str, object]:
+    payload = doc.to_dict() or {}
+    for key, value in list(payload.items()):
+        if isinstance(value, datetime):
+            payload[key] = value.isoformat()
+    payload["run_id"] = doc.id
+    return payload
 
 
 def get_credentials() -> Credentials:
@@ -1050,6 +1132,158 @@ def run_batch_audit(folder_ids: List[str], alert_threshold: Optional[float] = No
             continue
         batch_summary.append({"folder_id": folder_id, "result": result})
     return {"status": "completed", "batch": batch_summary}
+
+
+@app.post("/api/rpa/runs")
+def ingest_run(request: RunIngestRequest, x_api_key: Optional[str] = Header(None)):
+    client = get_firestore_or_503()
+    verify_bot_api_key(client, request.bot_id, x_api_key)
+
+    orders_total = request.orders_total
+    orders_processed = request.orders_processed
+    if orders_processed > orders_total:
+        raise HTTPException(status_code=400, detail="orders_processed cannot exceed orders_total.")
+
+    computed_success = request.success_rate
+    if computed_success is None:
+        computed_success = (orders_processed / orders_total) * 100 if orders_total > 0 else 0.0
+    computed_success = max(0.0, min(100.0, round(computed_success, 2)))
+
+    remark = (request.remark or "").strip()
+    if len(remark) > 200:
+        remark = remark[:200]
+
+    run_ref = client.collection("runs").document()
+    now_dt = datetime.utcnow()
+    run_doc = {
+        "bot_id": request.bot_id,
+        "timestamp": firestore.SERVER_TIMESTAMP,
+        "timestamp_iso": now_dt.isoformat(),
+        "orders_total": orders_total,
+        "orders_processed": orders_processed,
+        "orders_unsigned": max(orders_total - orders_processed, 0),
+        "success_rate": computed_success,
+        "remark": remark,
+        "source": "push",
+        "meta": {},
+    }
+
+    run_ref.set(run_doc)
+
+    if request.orders:
+        batch = client.batch()
+        orders_ref = run_ref.collection("orders")
+        for order in request.orders:
+            order_payload = order.dict()
+            order_payload["created_at"] = firestore.SERVER_TIMESTAMP
+            order_ref = orders_ref.document(order.order_id) if order.order_id else orders_ref.document()
+            batch.set(order_ref, order_payload)
+        batch.commit()
+
+    client.collection("bots").document(request.bot_id).set({"last_seen_at": firestore.SERVER_TIMESTAMP}, merge=True)
+
+    return {"status": "ok", "run_id": run_ref.id}
+
+
+@app.get("/api/rpa/runs/latest")
+def latest_run(bot_id: str, x_api_key: Optional[str] = Header(None)):
+    client = get_firestore_or_503()
+    verify_bot_api_key(client, bot_id, x_api_key)
+
+    runs_ref = client.collection("runs")
+    docs = list(
+        runs_ref.where("bot_id", "==", bot_id)
+        .order_by("timestamp", direction=firestore.Query.DESCENDING)
+        .limit(1)
+        .stream()
+    )
+    if not docs:
+        raise HTTPException(status_code=404, detail="No runs found for this bot.")
+
+    return {"status": "success", "run": _serialize_run_doc(docs[0])}
+
+
+@app.get("/api/rpa/runs/summary")
+def summary_run(bot_id: str, range_days: int = 7, x_api_key: Optional[str] = Header(None)):
+    if range_days <= 0:
+        range_days = 7
+
+    client = get_firestore_or_503()
+    verify_bot_api_key(client, bot_id, x_api_key)
+
+    start_time = datetime.utcnow() - timedelta(days=range_days)
+    runs_ref = client.collection("runs")
+    docs = list(
+        runs_ref.where("bot_id", "==", bot_id)
+        .where("timestamp", ">=", start_time)
+        .order_by("timestamp")
+        .stream()
+    )
+
+    if not docs:
+        return {
+            "status": "success",
+            "summary": {
+                "runs": 0,
+                "orders_total": 0,
+                "orders_processed": 0,
+                "orders_unsigned": 0,
+                "success_rate": 0.0,
+                "top_remarks": [],
+                "trend": [],
+            },
+        }
+
+    total_orders = 0
+    total_processed = 0
+    remark_counts: Dict[str, int] = {}
+    trend: Dict[str, Dict[str, int]] = {}
+
+    for doc in docs:
+        data = doc.to_dict() or {}
+        orders_total = int(data.get("orders_total", 0) or 0)
+        orders_processed = int(data.get("orders_processed", 0) or 0)
+        total_orders += orders_total
+        total_processed += orders_processed
+
+        sr = data.get("success_rate")
+        if sr is None and orders_total > 0:
+            sr = (orders_processed / orders_total) * 100
+
+        remark = (data.get("remark") or "").strip()
+        if remark:
+            remark_counts[remark] = remark_counts.get(remark, 0) + 1
+
+        ts = data.get("timestamp")
+        if isinstance(ts, datetime):
+            bucket = ts.date().isoformat()
+            if bucket not in trend:
+                trend[bucket] = {"orders_total": 0, "orders_processed": 0}
+            trend[bucket]["orders_total"] += orders_total
+            trend[bucket]["orders_processed"] += orders_processed
+
+    success_rate_overall = 0.0
+    if total_orders > 0:
+        success_rate_overall = round((total_processed / total_orders) * 100, 2)
+
+    top_remarks = sorted(remark_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    trend_list = [
+        {"date": day, "orders_total": payload["orders_total"], "orders_processed": payload["orders_processed"]}
+        for day, payload in sorted(trend.items())
+    ]
+
+    return {
+        "status": "success",
+        "summary": {
+            "runs": len(docs),
+            "orders_total": total_orders,
+            "orders_processed": total_processed,
+            "orders_unsigned": max(total_orders - total_processed, 0),
+            "success_rate": success_rate_overall,
+            "top_remarks": top_remarks,
+            "trend": trend_list,
+        },
+    }
 
 
 @app.post("/audit-agency-data")

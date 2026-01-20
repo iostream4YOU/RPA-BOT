@@ -24,6 +24,25 @@ const extractMetadata = (record) => {
   };
 };
 
+// Aggregate success/failure counts from an audit record
+const extractCounts = (record) => {
+  const auditResults = record.audit_results || [];
+  if (auditResults.length > 0) {
+    const successCount = auditResults.reduce((acc, curr) => acc + (curr.stats?.success_count || 0), 0);
+    const failureCount = auditResults.reduce((acc, curr) => acc + (curr.stats?.failure_count || 0), 0);
+    return { successCount, failureCount };
+  }
+
+  if (record.stats) {
+    return {
+      successCount: record.stats.success_count || 0,
+      failureCount: record.stats.failure_count || 0,
+    };
+  }
+
+  return { successCount: 0, failureCount: 0 };
+};
+
 export const base44Client = {
   getDashboardData: async () => {
     try {
@@ -128,12 +147,15 @@ export const base44Client = {
         latestAudit: latestStats,
         recentAudits: sortedHistory.map(record => {
           const meta = extractMetadata(record);
+          const counts = extractCounts(record);
           return {
             id: record.id || Math.random().toString(36).substr(2, 9),
             agency: meta.agency,
             ehr: meta.ehr,
             status: record.status === 'success' ? 'Success' : 'Failed',
             date: record.audit_timestamp || record.created_at || record.date,
+            successCount: counts.successCount,
+            failureCount: counts.failureCount,
             remarks: meta.remarks,
             details: record // Pass the full record for the details view
           };
@@ -159,12 +181,15 @@ export const base44Client = {
 
       return history.map(record => {
         const meta = extractMetadata(record);
+        const counts = extractCounts(record);
         return {
           id: record.id || Math.random().toString(36).substr(2, 9),
           agency: meta.agency,
           ehr: meta.ehr,
           status: record.status === 'success' ? 'Success' : 'Failed',
           date: record.audit_timestamp,
+          successCount: counts.successCount,
+          failureCount: counts.failureCount,
           remarks: meta.remarks,
           details: record // Pass the full record for the details view
         };
