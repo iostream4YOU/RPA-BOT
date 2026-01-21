@@ -25,7 +25,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 from prometheus_client import Counter, Histogram, REGISTRY
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import get_settings
@@ -171,7 +171,11 @@ class BatchAuditRequest(BaseModel):
 
 class RunOrder(BaseModel):
     order_id: Optional[str] = Field(None, description="Order identifier if available.")
-    status: str = Field(..., pattern=r"^(signed|unsigned)$", description="Order status.")
+    status: str = Field(
+        ...,
+        pattern=r"^(signed|unsigned|success|failed)$",
+        description="Order status (accepts signed/unsigned/success/failed).",
+    )
     reason: Optional[str] = Field(None, description="Failure or remark reason.")
     ehr: Optional[str] = Field(None, description="EHR name if known.")
     agency: Optional[str] = Field(None, description="Agency name if known.")
@@ -180,10 +184,44 @@ class RunOrder(BaseModel):
 
 
 class RunIngestRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "bot_id": "Axxess-LunaVista",
+                "orders_total": 50,
+                "orders_processed": 25,
+                "success_rate": 50,
+                "run_date": "01/21/2025",
+                "bot_type": "signed",
+                "ehr": "Axxess",
+                "agency": "Luna Vista",
+                "remark": "batch summary",
+                "orders": [
+                    {
+                        "order_id": "order1",
+                        "status": "failed",
+                        "reason": "Patient Does not exist",
+                        "ehr": "Axxess",
+                        "agency": "Luna Vista",
+                    },
+                    {
+                        "order_id": "order2",
+                        "status": "success",
+                        "reason": "",
+                    },
+                ],
+            }
+        }
+    )
+
     bot_id: str
     orders_total: int = Field(..., ge=0)
     orders_processed: int = Field(..., ge=0)
     success_rate: Optional[float] = Field(None, ge=0, le=100)
+    bot_type: Optional[str] = Field(None, description="Bot type if provided (signed/unsigned/etc.)")
+    ehr: Optional[str] = Field(None, description="EHR for the batch (optional if per-order).")
+    agency: Optional[str] = Field(None, description="Agency for the batch (optional if per-order).")
+    run_date: Optional[str] = Field(None, description="Run date string from caller (optional).")
     remark: Optional[str] = Field(None, description="Common remark / reason")
     orders: Optional[List[RunOrder]] = Field(None, description="Optional per-order details.")
 
@@ -1135,9 +1173,13 @@ def run_batch_audit(folder_ids: List[str], alert_threshold: Optional[float] = No
 
 
 @app.post("/api/rpa/runs")
-def ingest_run(request: RunIngestRequest, x_api_key: Optional[str] = Header(None)):
+def ingest_run(request: RunIngestRequest):
     client = get_firestore_or_503()
-    verify_bot_api_key(client, request.bot_id, x_api_key)
+
+    return _persist_run(client, request)
+
+
+def _persist_run(client: firestore.Client, request: RunIngestRequest) -> Dict[str, object]:
 
     orders_total = request.orders_total
     orders_processed = request.orders_processed
@@ -1155,10 +1197,15 @@ def ingest_run(request: RunIngestRequest, x_api_key: Optional[str] = Header(None
 
     run_ref = client.collection("runs").document()
     now_dt = datetime.utcnow()
+    run_date = request.run_date or None
     run_doc = {
         "bot_id": request.bot_id,
         "timestamp": firestore.SERVER_TIMESTAMP,
         "timestamp_iso": now_dt.isoformat(),
+        "run_date": run_date,
+        "bot_type": request.bot_type,
+        "ehr": request.ehr,
+        "agency": request.agency,
         "orders_total": orders_total,
         "orders_processed": orders_processed,
         "orders_unsigned": max(orders_total - orders_processed, 0),
@@ -1175,14 +1222,28 @@ def ingest_run(request: RunIngestRequest, x_api_key: Optional[str] = Header(None
         orders_ref = run_ref.collection("orders")
         for order in request.orders:
             order_payload = order.dict()
+            order_payload.setdefault("ehr", request.ehr)
+            order_payload.setdefault("agency", request.agency)
             order_payload["created_at"] = firestore.SERVER_TIMESTAMP
             order_ref = orders_ref.document(order.order_id) if order.order_id else orders_ref.document()
             batch.set(order_ref, order_payload)
         batch.commit()
 
-    client.collection("bots").document(request.bot_id).set({"last_seen_at": firestore.SERVER_TIMESTAMP}, merge=True)
-
     return {"status": "ok", "run_id": run_ref.id}
+
+
+@app.post("/api/rpa/runs/bulk")
+def ingest_runs_bulk(requests: List[RunIngestRequest]):
+    client = get_firestore_or_503()
+
+    results = []
+    for req in requests:
+        try:
+            results.append(_persist_run(client, req))
+        except HTTPException as err:
+            results.append({"status": "error", "detail": err.detail, "bot_id": req.bot_id})
+
+    return {"status": "ok", "results": results}
 
 
 @app.get("/api/rpa/runs/latest")
