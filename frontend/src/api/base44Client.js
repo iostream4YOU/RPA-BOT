@@ -44,6 +44,23 @@ const extractCounts = (record) => {
 };
 
 export const base44Client = {
+  refreshAuditData: async () => {
+    const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
+    const response = await fetch(
+      `${backendUrl.replace(/\/$/, '')}/audit-agency-data`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true'
+        },
+        body: JSON.stringify({})
+      }
+    );
+    if (!response.ok) throw new Error('Failed to refresh audit data');
+    return response.json();
+  },
+
   getDashboardData: async () => {
     try {
       // Add timestamp to prevent caching

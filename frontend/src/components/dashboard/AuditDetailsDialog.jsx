@@ -150,6 +150,28 @@ export default function AuditDetailsDialog({ audit, open, onOpenChange }) {
                       </div>
                     </CardHeader>
                     <CardContent className="pt-6">
+                      {(() => {
+                        const counts = result.stats?.failure_reason_counts || {};
+                        const reasonsFromCounts = Object.keys(counts);
+                        const reasonsFromList = result.unique_failure_reasons || result.stats?.unique_failure_reasons || [];
+                        const reasons = (reasonsFromCounts.length ? reasonsFromCounts : reasonsFromList) || [];
+                        return reasons.length > 0 ? (
+                          <div className="mb-6">
+                            <div className="text-xs font-semibold uppercase text-muted-foreground mb-2 flex items-center gap-2">
+                              <AlertCircle className="w-3 h-3" /> Issue Reasons
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {reasons.map((reason) => (
+                                <Badge key={reason} variant="outline" className="bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-200 dark:border-red-900/40">
+                                  {reason}
+                                  {counts[reason] ? ` (${counts[reason]})` : ''}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null;
+                      })()}
+
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
                         <div className="p-4 rounded-lg bg-green-50 dark:bg-green-900/10 border border-green-100 dark:border-green-900/20">
                           <div className="flex items-center gap-2 text-green-700 dark:text-green-400 mb-2">
@@ -199,6 +221,59 @@ export default function AuditDetailsDialog({ audit, open, onOpenChange }) {
                                 details={result.stats?.failure_details?.[reason]} 
                               />
                             ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {!result.stats?.failure_reason_counts?.length && (result.unique_failure_reasons?.length || result.stats?.unique_failure_reasons?.length) && (
+                        <div className="mt-6">
+                          <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                            <AlertCircle className="w-4 h-4 text-amber-500" />
+                            Failure Analysis
+                          </h4>
+                          <div className="flex flex-wrap gap-2">
+                            {(result.unique_failure_reasons || result.stats?.unique_failure_reasons || []).map((reason) => (
+                              <Badge key={reason} variant="outline" className="bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-200 dark:border-red-900/40">
+                                {reason}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {result.orders && result.orders.length > 0 && (
+                        <div className="mt-8">
+                          <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-indigo-500" />
+                            Orders Breakdown (from Firestore)
+                          </h4>
+                          <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+                            <div className="grid grid-cols-12 bg-slate-50 dark:bg-slate-900/50 text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
+                              <div className="col-span-3 px-3 py-2">Order ID</div>
+                              <div className="col-span-2 px-3 py-2">Status</div>
+                              <div className="col-span-7 px-3 py-2">Reason / Remark</div>
+                            </div>
+                            <div className="max-h-[240px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
+                              {result.orders.map((order, idx) => {
+                                const status = (order.status || '').toString();
+                                const reason = order.reason || order.remark || '—';
+                                return (
+                                  <div key={`${order.order_id || order.id || idx}`} className="grid grid-cols-12 text-sm px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                                    <div className="col-span-3 font-mono text-xs text-slate-700 dark:text-slate-300 truncate" title={order.order_id || order.id || 'Unknown'}>
+                                      {order.order_id || order.id || 'Unknown'}
+                                    </div>
+                                    <div className="col-span-2">
+                                      <Badge variant={status.toLowerCase() === 'success' || status.toLowerCase() === 'signed' ? 'success' : 'destructive'}>
+                                        {status || 'unknown'}
+                                      </Badge>
+                                    </div>
+                                    <div className="col-span-7 text-slate-700 dark:text-slate-200 truncate" title={reason}>
+                                      {reason}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
                           </div>
                         </div>
                       )}

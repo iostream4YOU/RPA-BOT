@@ -152,9 +152,10 @@ app.add_middleware(
 
 
 class AuditRequest(BaseModel):
-    folder_id: str = Field(
-        default="14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ",
-        description="Google Drive folder ID to audit.",
+    # Optional now; Firestore is the primary source. Only used as a legacy fallback.
+    folder_id: Optional[str] = Field(
+        default=None,
+        description="(Legacy) Google Drive folder ID to audit if Firestore data is unavailable.",
         example="14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ"
     )
 
@@ -283,6 +284,222 @@ def _serialize_run_doc(doc) -> Dict[str, object]:
             payload[key] = value.isoformat()
     payload["run_id"] = doc.id
     return payload
+
+
+def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: Optional[List[Dict[str, object]]] = None) -> Dict[str, object]:
+    """Normalize Firestore run doc into dashboard-friendly history shape."""
+    ts = data.get("timestamp")
+    if isinstance(ts, datetime):
+        ts_iso = ts.isoformat()
+    else:
+        ts_iso = data.get("timestamp_iso") or data.get("run_date") or datetime.utcnow().isoformat()
+
+    # Derive stats. Prefer orders collection if provided.
+    orders_total = int(data.get("orders_total") or 0)
+    orders_processed = int(data.get("orders_processed") or 0)
+    failure_count = max(orders_total - orders_processed, 0)
+    unique_failure_reasons: List[str] = []
+    failure_reason_counts: Dict[str, int] = {}
+    failure_details: Dict[str, List[str]] = {}
+
+    if orders:
+        orders_total = len(orders)
+        success_count_calc = 0
+        for order in orders:
+            status = (order.get("status") or "").lower()
+            reason = (order.get("reason") or order.get("remark") or "").strip()
+            order_id = order.get("order_id") or order.get("id") or "unknown"
+            is_success = status in {"success", "signed"}
+            if is_success:
+                success_count_calc += 1
+            else:
+                if reason:
+                    unique_failure_reasons.append(reason)
+                    failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
+                    failure_details.setdefault(reason, []).append(order_id)
+        orders_processed = success_count_calc
+        failure_count = orders_total - orders_processed
+        unique_failure_reasons = list(dict.fromkeys(unique_failure_reasons))  # dedupe preserving order
+
+    success_rate = data.get("success_rate")
+    if success_rate is None and orders_total > 0:
+        success_rate = round((orders_processed / orders_total) * 100, 2)
+    if success_rate is None:
+        success_rate = 0.0
+
+    status = "success" if failure_count == 0 else "failed"
+    remarks = (data.get("remark") or "No issues found").strip() or "No issues found"
+
+    # Provide an audit_results stub so frontend aggregation continues to work
+    audit_results = [
+        {
+            "stats": {
+                "total_rows": orders_total,
+                "success_count": orders_processed,
+                "failure_count": failure_count,
+                "success_rate": success_rate,
+                "failure_rate": max(100 - success_rate, 0),
+                "failure_reason_counts": failure_reason_counts,
+                "failure_details": failure_details,
+            },
+            "unique_failure_reasons": unique_failure_reasons,
+            "failure_reason_counts": failure_reason_counts,
+            "failure_details": failure_details,
+            "orders": orders or [],
+        }
+    ]
+
+    return {
+        "id": run_id,
+        "run_id": run_id,
+        "audit_timestamp": ts_iso,
+        "date": ts_iso,
+        "agency": data.get("agency") or "Unknown",
+        "ehr": data.get("ehr") or "Unknown",
+        "status": status,
+        "remark": remarks,
+        "error_message": remarks,
+        "orders_total": orders_total,
+        "orders_processed": orders_processed,
+        "success_rate": success_rate,
+        "audit_results": audit_results,
+        "stats": {
+            "total_rows": orders_total,
+            "success_count": orders_processed,
+            "failure_count": failure_count,
+            "success_rate": success_rate,
+            "failure_rate": max(100 - success_rate, 0),
+            "failure_reason_counts": failure_reason_counts,
+            "failure_details": failure_details,
+        },
+        "unique_failure_reasons": unique_failure_reasons,
+        "failure_reason_counts": failure_reason_counts,
+        "failure_details": failure_details,
+        "orders": orders or [],
+    }
+
+
+def _map_firestore_run_to_audit_result(run_id: str, data: Dict[str, object], orders: Optional[List[Dict[str, object]]] = None) -> Dict[str, object]:
+    """Map a Firestore run doc into legacy audit_result shape used by /audit-agency-data."""
+    ts = data.get("timestamp")
+    ts_iso = ts.isoformat() if isinstance(ts, datetime) else data.get("timestamp_iso") or datetime.utcnow().isoformat()
+
+    orders_total = int(data.get("orders_total") or 0)
+    orders_processed = int(data.get("orders_processed") or 0)
+    failure_count = max(orders_total - orders_processed, 0)
+    unique_failure_reasons: List[str] = []
+    failure_reason_counts: Dict[str, int] = {}
+    failure_details: Dict[str, List[str]] = {}
+
+    if orders:
+        orders_total = len(orders)
+        success_count_calc = 0
+        for order in orders:
+            status = (order.get("status") or "").lower()
+            reason = (order.get("reason") or order.get("remark") or "").strip()
+            order_id = order.get("order_id") or order.get("id") or "unknown"
+            is_success = status in {"success", "signed"}
+            if is_success:
+                success_count_calc += 1
+            else:
+                if reason:
+                    unique_failure_reasons.append(reason)
+                    failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
+                    failure_details.setdefault(reason, []).append(order_id)
+        orders_processed = success_count_calc
+        failure_count = orders_total - orders_processed
+        unique_failure_reasons = list(dict.fromkeys(unique_failure_reasons))
+
+    success_rate = data.get("success_rate")
+    if success_rate is None and orders_total > 0:
+        success_rate = round((orders_processed / orders_total) * 100, 2)
+    if success_rate is None:
+        success_rate = 0.0
+    failure_rate = max(100 - success_rate, 0)
+
+    remark = (data.get("remark") or "No issues found").strip() or "No issues found"
+
+    return {
+        "agency": data.get("agency") or "Unknown",
+        "ehr": data.get("ehr") or "Unknown",
+        "file_name": data.get("bot_id") or data.get("ehr") or "run",
+        "template_type": data.get("bot_type") or "mixed",
+        "stats": {
+            "total_rows": orders_total,
+            "success_rate": f"{success_rate:.1f}%",
+            "failure_rate": f"{failure_rate:.1f}%",
+            "success_count": orders_processed,
+            "failure_count": failure_count,
+            "signed_count": orders_processed,  # best-effort mapping
+            "unsigned_count": max(orders_total - orders_processed, 0),
+            "failure_reason_counts": failure_reason_counts,
+            "failure_details": failure_details,
+        },
+        "unique_failure_reasons": unique_failure_reasons,
+        "failure_reason_counts": failure_reason_counts,
+        "failure_details": failure_details,
+        "error_message": remark,
+        "audit_timestamp": ts_iso,
+        "run_id": run_id,
+        "orders": orders or [],
+    }
+
+
+def _fetch_orders_for_run(client: firestore.Client, run_id: str) -> List[Dict[str, object]]:
+    try:
+        orders_ref = client.collection("runs").document(run_id).collection("orders")
+        return [doc.to_dict() or {} for doc in orders_ref.stream()]
+    except Exception as err:  # pragma: no cover - defensive logging
+        logger.warning("Failed to fetch orders for run {}: {}", run_id, err)
+        return []
+
+
+def _fetch_firestore_history(limit: int) -> Optional[List[Dict[str, object]]]:
+    """Return recent runs from Firestore or None if unavailable."""
+    client = init_firestore()
+    if client is None:
+        return None
+
+    try:
+        docs = (
+            client.collection("runs")
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        history: List[Dict[str, object]] = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            orders = _fetch_orders_for_run(client, doc.id)
+            history.append(_map_firestore_run_to_history(doc.id, data, orders))
+        return history
+    except Exception as err:  # pragma: no cover - defensive logging
+        logger.warning("Failed to fetch Firestore runs: {}", err)
+        return None
+
+
+def _fetch_firestore_audit_results(limit: int) -> Optional[List[Dict[str, object]]]:
+    """Return Firestore runs mapped to audit_results shape or None if unavailable."""
+    client = init_firestore()
+    if client is None:
+        return None
+
+    try:
+        docs = (
+            client.collection("runs")
+            .order_by("timestamp", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        mapped: List[Dict[str, object]] = []
+        for doc in docs:
+            data = doc.to_dict() or {}
+            orders = _fetch_orders_for_run(client, doc.id)
+            mapped.append(_map_firestore_run_to_audit_result(doc.id, data, orders))
+        return mapped
+    except Exception as err:  # pragma: no cover - defensive logging
+        logger.warning("Failed to fetch Firestore audit results: {}", err)
+        return None
 
 
 def get_credentials() -> Credentials:
@@ -1348,8 +1565,20 @@ def summary_run(bot_id: str, range_days: int = 7, x_api_key: Optional[str] = Hea
 
 
 @app.post("/audit-agency-data")
-def audit_agency_data(request: AuditRequest):
-    folder_id = request.folder_id or "14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ"
+def audit_agency_data(request: Optional[AuditRequest] = None):
+    # Prefer Firestore-sourced runs (new pipeline). Fall back to legacy Drive audit if Firestore unavailable.
+    firestore_results = _fetch_firestore_audit_results(limit=50)
+    if firestore_results is not None and len(firestore_results) > 0:
+        return {
+            "status": "success",
+            "audit_timestamp": datetime.utcnow().isoformat(),
+            "audit_results": firestore_results,
+            "paired_results": [],
+            "reconciliation_summary": [],
+        }
+
+    # Legacy behavior: trigger Drive-based audit only if a folder_id is provided
+    folder_id = (request.folder_id if request else None) or "14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ"
     if not folder_id:
         raise HTTPException(status_code=400, detail="No folder ID provided.")
     return run_audit(folder_id)
@@ -1394,9 +1623,12 @@ def drive_files(folder_id: str):
 
 @app.get("/audit-history")
 def audit_history(limit: int = 25):
+    # New behavior: try Firestore first (live bot runs), fall back to persisted batches/DB history
+    firestore_history = _fetch_firestore_history(limit)
+    if firestore_history is not None and len(firestore_history) > 0:
+        return {"status": "success", "history": firestore_history}
+
     # Prefer full batch summaries if available, otherwise fall back to individual runs (or return both?)
-    # The dashboard expects a list of "audits".
-    # If we return batches, they contain the full details.
     batches = history_repository.fetch_recent_batches(limit)
     if batches:
         return {"status": "success", "history": batches}

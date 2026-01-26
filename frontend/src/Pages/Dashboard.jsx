@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import Layout from '@/Layout';
 import KPICards from '@/components/dashboard/KPICards';
 import LatestAuditSummary from '@/components/dashboard/LatestAuditSummary';
@@ -13,9 +13,9 @@ import { Button } from '@/components/ui/button';
 export default function Dashboard() {
   const [filters, setFilters] = useState({
     search: '',
-    status: '',
-    ehr: '',
-    agency: '',
+    status: 'all',
+    ehr: 'all',
+    agency: 'all',
     date: null
   });
 
@@ -25,28 +25,32 @@ export default function Dashboard() {
     refetchInterval: 30000, // Real-time refresh every 30s
   });
 
+  const refreshMutation = useMutation({
+    mutationFn: base44Client.refreshAuditData,
+    onSuccess: () => refetch(),
+  });
+
   const filteredAudits = React.useMemo(() => {
-    if (!data?.recentAudits) return [];
-    
-    return data.recentAudits.filter(audit => {
-      const matchesSearch = 
-        audit.id.toString().includes(filters.search) ||
-        audit.agency.toLowerCase().includes(filters.search.toLowerCase()) ||
-        audit.ehr.toLowerCase().includes(filters.search.toLowerCase());
-      
-      const matchesStatus = 
-        !filters.status || filters.status === 'all' || 
+    const audits = data?.recentAudits || [];
+    const search = filters.search.toLowerCase();
+
+    return audits.filter(audit => {
+      const matchesSearch =
+        audit.id.toString().includes(search) ||
+        (audit.agency || '').toLowerCase().includes(search) ||
+        (audit.ehr || '').toLowerCase().includes(search) ||
+        (audit.remarks || '').toLowerCase().includes(search);
+
+      const matchesStatus =
+        filters.status === 'all' ||
         audit.status.toLowerCase() === filters.status.toLowerCase();
 
-      const matchesEhr = 
-        !filters.ehr || filters.ehr === 'all' || 
-        audit.ehr === filters.ehr;
+      const matchesEhr =
+        filters.ehr === 'all' || audit.ehr === filters.ehr;
 
-      const matchesAgency = 
-        !filters.agency || filters.agency === 'all' || 
-        audit.agency === filters.agency;
+      const matchesAgency =
+        filters.agency === 'all' || audit.agency === filters.agency;
 
-      // Simple date match (checking if same day)
       const matchesDate = !filters.date || (
         new Date(audit.date).toDateString() === filters.date.toDateString()
       );
@@ -54,6 +58,43 @@ export default function Dashboard() {
       return matchesSearch && matchesStatus && matchesEhr && matchesAgency && matchesDate;
     });
   }, [data, filters]);
+
+  const derivedStats = React.useMemo(() => {
+    const audits = filteredAudits;
+    const totalAudits = audits.length;
+    const successSum = audits.reduce((acc, a) => acc + (a.successCount || 0), 0);
+    const failureSum = audits.reduce((acc, a) => acc + (a.failureCount || 0), 0);
+    const totalRows = successSum + failureSum;
+    const successRate = totalRows ? Math.round((successSum / totalRows) * 100) : 0;
+    const failedAudits = audits.filter(a => a.status.toLowerCase() === 'failed').length;
+    return {
+      totalAudits,
+      successRate,
+      failedAudits,
+      avgTime: data?.stats?.avgTime || '~',
+    };
+  }, [filteredAudits, data]);
+
+  const latestAudit = React.useMemo(() => {
+    if (!filteredAudits.length) return null;
+    const sorted = [...filteredAudits].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const top = sorted[0];
+    const successRate = top.totalRows
+      ? Math.round(((top.successCount || 0) / top.totalRows) * 100)
+      : (top.successRate ?? 0);
+    const failureReasons = top.details?.audit_results
+      ? top.details.audit_results.flatMap(r => r.unique_failure_reasons || [])
+      : top.failureReasons || [];
+    return {
+      agency: top.agency,
+      timestamp: top.date,
+      totalRows: top.successCount + top.failureCount,
+      successCount: top.successCount,
+      failureCount: top.failureCount,
+      successRate: successRate,
+      failureReasons,
+    };
+  }, [filteredAudits]);
 
   if (isLoading) {
     return (
@@ -90,19 +131,19 @@ export default function Dashboard() {
           <Button 
             variant="outline" 
             size="sm" 
-            onClick={() => refetch()}
-            disabled={isRefetching}
+            onClick={() => refreshMutation.mutate()}
+            disabled={isRefetching || refreshMutation.isLoading}
           >
-            <RefreshCw className={`mr-2 h-4 w-4 ${isRefetching ? 'animate-spin' : ''}`} />
-            {isRefetching ? 'Refreshing...' : 'Refresh Data'}
+            <RefreshCw className={`mr-2 h-4 w-4 ${(isRefetching || refreshMutation.isLoading) ? 'animate-spin' : ''}`} />
+            {(isRefetching || refreshMutation.isLoading) ? 'Refreshing...' : 'Refresh Data'}
           </Button>
         </div>
 
-        {data.latestAudit && <LatestAuditSummary audit={data.latestAudit} />}
+        {latestAudit && <LatestAuditSummary audit={latestAudit} />}
 
-        <KPICards stats={data.stats} />
+        <KPICards stats={derivedStats} />
         
-        <AnalyticsCharts data={data} />
+        <AnalyticsCharts audits={filteredAudits} />
 
         <div className="space-y-4">
           <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-50">
@@ -112,7 +153,7 @@ export default function Dashboard() {
           <FilterPanel 
             filters={filters} 
             setFilters={setFilters}
-            onClearFilters={() => setFilters({ search: '', status: '', ehr: '', date: null })}
+            onClearFilters={() => setFilters({ search: '', status: 'all', ehr: 'all', agency: 'all', date: null })}
           />
           
           <AuditTable data={filteredAudits} />

@@ -1,0 +1,10 @@
+.git
+.gitignore
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+audit_history.db
+credentials.json
+firebase-service-account.json

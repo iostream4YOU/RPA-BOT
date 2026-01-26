@@ -35,18 +35,14 @@ const CustomTooltip = ({ active, payload, label }) => {
   return null;
 };
 
-export default function AnalyticsCharts({ data }) {
+export default function AnalyticsCharts({ audits }) {
   const { activityData, ehrDistribution } = useMemo(() => {
-    if (!data?.recentAudits) return { activityData: [], ehrDistribution: [] };
+    const recentAudits = audits || [];
 
-    // Process Activity Data (Last 7 Days)
-    const last7Days = Array.from({ length: 7 }, (_, i) => {
-      const d = subDays(new Date(), 6 - i);
-      return d;
-    });
+    const last7Days = Array.from({ length: 7 }, (_, i) => subDays(new Date(), 6 - i));
 
     const activity = last7Days.map(date => {
-      const dayAudits = data.recentAudits.filter(audit => {
+      const dayAudits = recentAudits.filter(audit => {
         const auditDate = new Date(audit.date);
         return isSameDay(auditDate, date);
       });
@@ -59,8 +55,7 @@ export default function AnalyticsCharts({ data }) {
       };
     });
 
-    // Process EHR Distribution
-    const ehrCounts = data.recentAudits.reduce((acc, audit) => {
+    const ehrCounts = recentAudits.reduce((acc, audit) => {
       const ehr = audit.ehr || 'Unknown';
       acc[ehr] = (acc[ehr] || 0) + 1;
       return acc;
@@ -71,7 +66,7 @@ export default function AnalyticsCharts({ data }) {
       .sort((a, b) => b.value - a.value);
 
     return { activityData: activity, ehrDistribution: distribution };
-  }, [data]);
+  }, [audits]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
@@ -147,7 +142,7 @@ export default function AnalyticsCharts({ data }) {
         </CardHeader>
         <CardContent>
           <div className="h-[300px] w-full relative">
-            {ehrDistribution.length > 0 ? (
+                  {ehrDistribution.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
@@ -181,11 +176,11 @@ export default function AnalyticsCharts({ data }) {
                 No data available
               </div>
             )}
-            {ehrDistribution.length > 0 && (
+                  {ehrDistribution.length > 0 && (
               <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
-                <div className="text-2xl font-bold text-slate-900 dark:text-slate-50">
-                  {data.recentAudits?.length || 0}
-                </div>
+                      <div className="text-2xl font-bold text-slate-900 dark:text-slate-50">
+                        {audits?.length || 0}
+                      </div>
                 <div className="text-xs text-slate-500 dark:text-slate-400">Total Audits</div>
               </div>
             )}

@@ -52,6 +52,7 @@ export default function AuditTable({ data }) {
             <TableHead>Date</TableHead>
             <TableHead>Success</TableHead>
             <TableHead>Failure</TableHead>
+            <TableHead>Remarks</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -79,6 +80,9 @@ export default function AuditTable({ data }) {
               </TableCell>
               <TableCell>{audit.successCount ?? 0}</TableCell>
               <TableCell>{audit.failureCount ?? 0}</TableCell>
+              <TableCell className="max-w-[220px] truncate" title={audit.remarks || audit.details?.error_message}>
+                {audit.remarks || audit.details?.error_message || '—'}
+              </TableCell>
               <TableCell className="text-right">
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
