@@ -1,1 +1,9 @@
 node_modules
+.DS_Store
+__pycache__/
+*.pyc
+.env
+credentials.json
+firebase-service-account.json
+audit_history.db
+frontend/dist/
