@@ -190,6 +190,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://0.0.0.0:8000",
         "http://localhost:8000",
+        "https://api-rpa-dashboard.onrender.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
