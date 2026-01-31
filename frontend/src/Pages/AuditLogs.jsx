@@ -6,19 +6,33 @@ import FilterPanel from '@/components/dashboard/FilterPanel';
 import { base44Client } from '@/api/base44Client';
 import { Loader2, Download, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { startOfDay, endOfDay, isWithinInterval } from 'date-fns';
 
 export default function AuditLogs() {
   const [filters, setFilters] = useState({
     search: '',
-    status: '',
-    ehr: '',
-    agency: '',
+    status: 'all',
+    ehr: 'all',
+    agency: 'all',
+    botType: 'all',
     date: null
   });
 
+  const queryParams = useMemo(() => {
+    const params = {};
+    if (filters.date) {
+      const iso = filters.date.toISOString().slice(0, 10);
+      params.start_date = iso;
+      params.end_date = iso;
+    }
+    if (filters.agency && filters.agency !== 'all') params.agency = filters.agency;
+    if (filters.botType && filters.botType !== 'all') params.bot_type = filters.botType;
+    return params;
+  }, [filters.date, filters.agency, filters.botType]);
+
   const { data: audits, isLoading, error, refetch, isRefetching } = useQuery({
-    queryKey: ['auditLogs'],
-    queryFn: base44Client.getAuditLogs,
+    queryKey: ['auditLogs', queryParams],
+    queryFn: () => base44Client.getAuditLogs(queryParams),
     refetchInterval: 30000,
   });
 
@@ -26,9 +40,10 @@ export default function AuditLogs() {
     if (!audits) return [];
     
     return audits.filter(audit => {
+      const search = filters.search.toLowerCase();
       const matchesSearch = 
-        audit.id.toString().includes(filters.search) ||
-        (audit.remarks && audit.remarks.toLowerCase().includes(filters.search.toLowerCase()));
+        audit.id.toString().includes(search) ||
+        (audit.remarks && audit.remarks.toLowerCase().includes(search));
       
       const matchesStatus = 
         !filters.status || filters.status === 'all' || 
@@ -42,27 +57,35 @@ export default function AuditLogs() {
         !filters.agency || filters.agency === 'all' || 
         audit.agency === filters.agency;
 
-      const matchesDate = !filters.date || (
-        new Date(audit.date).toDateString() === filters.date.toDateString()
-      );
+      const matchesBotType =
+        !filters.botType || filters.botType === 'all' ||
+        (audit.botType || '').toLowerCase() === filters.botType;
 
-      return matchesSearch && matchesStatus && matchesEhr && matchesAgency && matchesDate;
+      const matchesDate = !filters.date || (() => {
+        const auditDate = audit.date ? new Date(audit.date) : null;
+        if (!auditDate || Number.isNaN(auditDate.getTime())) return false;
+        return isWithinInterval(auditDate, { start: startOfDay(filters.date), end: endOfDay(filters.date) });
+      })();
+
+      return matchesSearch && matchesStatus && matchesEhr && matchesAgency && matchesBotType && matchesDate;
     });
   }, [audits, filters]);
 
   const handleExport = () => {
     if (!filteredAudits.length) return;
     
-    const headers = ['ID', 'Agency', 'EHR', 'Status', 'Date', 'Remarks'];
+    const headers = ['ID', 'Agency', 'EHR', 'Bot Type', 'Status', 'Date', 'Remarks', 'Common Failure Reason'];
     const csvContent = [
       headers.join(','),
       ...filteredAudits.map(row => [
         row.id,
         `"${row.agency}"`,
         row.ehr,
+        row.botType,
         row.status,
         row.date,
-        `"${row.remarks}"`
+        `"${row.remarks}"`,
+        `"${row.commonFailureReason || ''}"`
       ].join(','))
     ].join('\n');
 
@@ -125,7 +148,7 @@ export default function AuditLogs() {
           <FilterPanel 
             filters={filters} 
             setFilters={setFilters}
-            onClearFilters={() => setFilters({ search: '', status: '', ehr: '', date: null })}
+            onClearFilters={() => setFilters({ search: '', status: 'all', ehr: 'all', agency: 'all', botType: 'all', date: null })}
           />
           
           <div className="text-sm text-slate-500 dark:text-slate-400">

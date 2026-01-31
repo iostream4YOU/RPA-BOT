@@ -4,6 +4,7 @@ import os
 import re
 import smtplib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from functools import lru_cache
@@ -23,6 +24,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+from google.auth.transport.requests import Request
 from prometheus_client import Counter, Histogram, REGISTRY
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field, ConfigDict
@@ -67,6 +69,44 @@ EMAIL_SMTP_USE_TLS = settings.audit_email_use_tls
 DEFAULT_BATCH_FOLDER_IDS = settings.batch_folder_ids
 FIREBASE_CREDENTIALS_PATH = settings.firebase_credentials_path
 FIREBASE_PROJECT_ID = settings.firebase_project_id
+FIRESTORE_FETCH_TIMEOUT = 30  # seconds; allow slower Firestore responses before falling back
+
+
+def _derive_status_from_counts(orders_total: int, orders_processed: int) -> str:
+    """Consistently derive status: success only when all orders are processed."""
+    return "success" if orders_total > 0 and orders_processed >= orders_total else "failed"
+
+
+def check_credentials_health() -> Dict[str, Dict[str, str]]:
+    """Surface credential health for dashboards/alerts."""
+    health: Dict[str, Dict[str, str]] = {}
+
+    # Service account / Google credentials
+    try:
+        creds = Credentials.from_service_account_file(
+            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", settings.google_credentials_path),
+            scopes=SCOPES,
+        )
+        # Service accounts don't "expire" like OAuth tokens; force a token refresh test to validate key
+        try:
+            creds.refresh(Request())
+            health["google_service_account"] = {"status": "ok", "detail": "Token refresh succeeded"}
+        except Exception as refresh_err:  # pragma: no cover - best effort
+            health["google_service_account"] = {"status": "error", "detail": f"Token refresh failed: {refresh_err}"}
+    except Exception as err:  # pragma: no cover - best effort
+        health["google_service_account"] = {"status": "error", "detail": f"Credentials load failed: {err}"}
+
+    # Firebase / Firestore credentials presence
+    try:
+        client = init_firestore()
+        if client is not None:
+            health["firestore"] = {"status": "ok", "detail": "Firestore client initialized"}
+        else:
+            health["firestore"] = {"status": "degraded", "detail": "Firestore credentials missing"}
+    except Exception as err:  # pragma: no cover - best effort
+        health["firestore"] = {"status": "error", "detail": f"Firestore init failed: {err}"}
+
+    return health
 
 DRIVE_RETRY_CONFIG = {
     "stop": stop_after_attempt(5),
@@ -143,7 +183,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://rpa-bot-1.vercel.app",
-        "https://9f3bdf6c59b4.ngrok-free.app"
+        "https://9f3bdf6c59b4.ngrok-free.app",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://0.0.0.0:8000",
+        "http://localhost:8000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -286,6 +332,17 @@ def _serialize_run_doc(doc) -> Dict[str, object]:
     return payload
 
 
+def _sanitize_reason(reason: Optional[str], remark: Optional[str] = None) -> Optional[str]:
+    """Normalize a reason; drop generic placeholders like 'batch summary'."""
+    text = (reason or "").strip()
+    if not text and remark:
+        text = remark.strip()
+    lowered = text.lower()
+    if lowered in {"batch summary", "summary", "batchsummary"}:
+        return None
+    return text or None
+
+
 def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: Optional[List[Dict[str, object]]] = None) -> Dict[str, object]:
     """Normalize Firestore run doc into dashboard-friendly history shape."""
     ts = data.get("timestamp")
@@ -298,17 +355,35 @@ def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: 
     orders_total = int(data.get("orders_total") or 0)
     orders_processed = int(data.get("orders_processed") or 0)
     failure_count = max(orders_total - orders_processed, 0)
-    unique_failure_reasons: List[str] = []
-    failure_reason_counts: Dict[str, int] = {}
-    failure_details: Dict[str, List[str]] = {}
+    # Start from any precomputed details we may have stored
+    failure_reason_counts: Dict[str, int] = dict(data.get("failure_reason_counts") or {})
+    failure_details: Dict[str, List[str]] = {k: list(v) for k, v in (data.get("failure_details") or {}).items()}
+    unique_failure_reasons: List[str] = list(dict.fromkeys(list(failure_reason_counts.keys())))
 
     if orders:
+        enriched_orders: List[Dict[str, object]] = []
         orders_total = len(orders)
         success_count_calc = 0
         for order in orders:
-            status = (order.get("status") or "").lower()
-            reason = (order.get("reason") or order.get("remark") or "").strip()
-            order_id = order.get("order_id") or order.get("id") or "unknown"
+            order_copy = dict(order)
+            status = (order_copy.get("status") or "").lower()
+            raw_reason = order_copy.get("reason") or order_copy.get("remark")
+            order_id = str(order_copy.get("order_id") or order_copy.get("id") or "unknown")
+            reason = _sanitize_reason(raw_reason, data.get("remark"))
+            if not reason and failure_details:
+                for r, ids in failure_details.items():
+                    if order_id and order_id in ids:
+                        reason = _sanitize_reason(r, data.get("remark"))
+                        break
+
+            # If still missing and failed, fall back to batch remark
+            if not reason and status not in {"success", "signed"}:
+                reason = _sanitize_reason(None, data.get("remark")) or "Reason not provided"
+
+            order_copy["reason"] = reason or order_copy.get("reason")
+            if not order_copy.get("remark"):
+                order_copy["remark"] = order_copy.get("reason")
+
             is_success = status in {"success", "signed"}
             if is_success:
                 success_count_calc += 1
@@ -317,9 +392,12 @@ def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: 
                     unique_failure_reasons.append(reason)
                     failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
                     failure_details.setdefault(reason, []).append(order_id)
+            enriched_orders.append(order_copy)
+
         orders_processed = success_count_calc
         failure_count = orders_total - orders_processed
         unique_failure_reasons = list(dict.fromkeys(unique_failure_reasons))  # dedupe preserving order
+        orders = enriched_orders
 
     success_rate = data.get("success_rate")
     if success_rate is None and orders_total > 0:
@@ -327,7 +405,7 @@ def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: 
     if success_rate is None:
         success_rate = 0.0
 
-    status = "success" if failure_count == 0 else "failed"
+    status = _derive_status_from_counts(orders_total, orders_processed)
     remarks = (data.get("remark") or "No issues found").strip() or "No issues found"
 
     # Provide an audit_results stub so frontend aggregation continues to work
@@ -339,8 +417,6 @@ def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: 
                 "failure_count": failure_count,
                 "success_rate": success_rate,
                 "failure_rate": max(100 - success_rate, 0),
-                "failure_reason_counts": failure_reason_counts,
-                "failure_details": failure_details,
             },
             "unique_failure_reasons": unique_failure_reasons,
             "failure_reason_counts": failure_reason_counts,
@@ -348,6 +424,26 @@ def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: 
             "orders": orders or [],
         }
     ]
+
+    # Derive bot type: prefer stored value, otherwise infer from orders
+    bot_type = (data.get("bot_type") or "").strip().lower()
+    if not bot_type:
+        signed_orders = 0
+        unsigned_orders = 0
+        for order in orders or []:
+            status = (order.get("status") or "").lower()
+            if status in {"signed", "success"}:
+                signed_orders += 1
+            elif status == "unsigned" or status == "failed":
+                unsigned_orders += 1
+        if signed_orders and not unsigned_orders:
+            bot_type = "signed"
+        elif unsigned_orders and not signed_orders:
+            bot_type = "unsigned"
+        elif signed_orders or unsigned_orders:
+            bot_type = "mixed"
+        else:
+            bot_type = "mixed"
 
     return {
         "id": run_id,
@@ -357,6 +453,7 @@ def _map_firestore_run_to_history(run_id: str, data: Dict[str, object], orders: 
         "agency": data.get("agency") or "Unknown",
         "ehr": data.get("ehr") or "Unknown",
         "status": status,
+        "bot_type": bot_type,
         "remark": remarks,
         "error_message": remarks,
         "orders_total": orders_total,
@@ -384,20 +481,39 @@ def _map_firestore_run_to_audit_result(run_id: str, data: Dict[str, object], ord
     ts = data.get("timestamp")
     ts_iso = ts.isoformat() if isinstance(ts, datetime) else data.get("timestamp_iso") or datetime.utcnow().isoformat()
 
+    bot_type = (data.get("bot_type") or "").strip().lower()
+
     orders_total = int(data.get("orders_total") or 0)
     orders_processed = int(data.get("orders_processed") or 0)
     failure_count = max(orders_total - orders_processed, 0)
-    unique_failure_reasons: List[str] = []
-    failure_reason_counts: Dict[str, int] = {}
-    failure_details: Dict[str, List[str]] = {}
+    failure_reason_counts: Dict[str, int] = dict(data.get("failure_reason_counts") or {})
+    failure_details: Dict[str, List[str]] = {k: list(v) for k, v in (data.get("failure_details") or {}).items()}
+    unique_failure_reasons: List[str] = list(dict.fromkeys(list(failure_reason_counts.keys())))
 
     if orders:
+        enriched_orders: List[Dict[str, object]] = []
         orders_total = len(orders)
         success_count_calc = 0
         for order in orders:
-            status = (order.get("status") or "").lower()
-            reason = (order.get("reason") or order.get("remark") or "").strip()
-            order_id = order.get("order_id") or order.get("id") or "unknown"
+            order_copy = dict(order)
+            status = (order_copy.get("status") or "").lower()
+            raw_reason = order_copy.get("reason") or order_copy.get("remark")
+            order_id = str(order_copy.get("order_id") or order_copy.get("id") or "unknown")
+
+            reason = _sanitize_reason(raw_reason, data.get("remark"))
+            if not reason and failure_details:
+                for r, ids in failure_details.items():
+                    if order_id and order_id in ids:
+                        reason = _sanitize_reason(r, data.get("remark"))
+                        break
+
+            if not reason and status not in {"success", "signed"}:
+                reason = _sanitize_reason(None, data.get("remark")) or "Reason not provided"
+
+            order_copy["reason"] = reason or order_copy.get("reason")
+            if not order_copy.get("remark"):
+                order_copy["remark"] = order_copy.get("reason")
+
             is_success = status in {"success", "signed"}
             if is_success:
                 success_count_calc += 1
@@ -406,9 +522,12 @@ def _map_firestore_run_to_audit_result(run_id: str, data: Dict[str, object], ord
                     unique_failure_reasons.append(reason)
                     failure_reason_counts[reason] = failure_reason_counts.get(reason, 0) + 1
                     failure_details.setdefault(reason, []).append(order_id)
+            enriched_orders.append(order_copy)
+
         orders_processed = success_count_calc
         failure_count = orders_total - orders_processed
         unique_failure_reasons = list(dict.fromkeys(unique_failure_reasons))
+        orders = enriched_orders
 
     success_rate = data.get("success_rate")
     if success_rate is None and orders_total > 0:
@@ -417,10 +536,29 @@ def _map_firestore_run_to_audit_result(run_id: str, data: Dict[str, object], ord
         success_rate = 0.0
     failure_rate = max(100 - success_rate, 0)
 
+    status = _derive_status_from_counts(orders_total, orders_processed)
+    if not bot_type:
+        signed_orders = 0
+        unsigned_orders = 0
+        for order in orders or []:
+            order_status = (order.get("status") or "").lower()
+            if order_status in {"signed", "success"}:
+                signed_orders += 1
+            elif order_status in {"unsigned", "failed"}:
+                unsigned_orders += 1
+        if signed_orders and not unsigned_orders:
+            bot_type = "signed"
+        elif unsigned_orders and not signed_orders:
+            bot_type = "unsigned"
+        elif signed_orders or unsigned_orders:
+            bot_type = "mixed"
+        else:
+            bot_type = "mixed"
+
     remark = (data.get("remark") or "No issues found").strip() or "No issues found"
 
     return {
-        "agency": data.get("agency") or "Unknown",
+            "template_type": bot_type or "mixed",
         "ehr": data.get("ehr") or "Unknown",
         "file_name": data.get("bot_id") or data.get("ehr") or "run",
         "template_type": data.get("bot_type") or "mixed",
@@ -438,6 +576,7 @@ def _map_firestore_run_to_audit_result(run_id: str, data: Dict[str, object], ord
         "unique_failure_reasons": unique_failure_reasons,
         "failure_reason_counts": failure_reason_counts,
         "failure_details": failure_details,
+            "bot_type": bot_type or "mixed",
         "error_message": remark,
         "audit_timestamp": ts_iso,
         "run_id": run_id,
@@ -460,7 +599,7 @@ def _fetch_firestore_history(limit: int) -> Optional[List[Dict[str, object]]]:
     if client is None:
         return None
 
-    try:
+    def _load_history() -> List[Dict[str, object]]:
         docs = (
             client.collection("runs")
             .order_by("timestamp", direction=firestore.Query.DESCENDING)
@@ -473,9 +612,19 @@ def _fetch_firestore_history(limit: int) -> Optional[List[Dict[str, object]]]:
             orders = _fetch_orders_for_run(client, doc.id)
             history.append(_map_firestore_run_to_history(doc.id, data, orders))
         return history
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(_load_history)
+        return future.result(timeout=FIRESTORE_FETCH_TIMEOUT)
+    except TimeoutError:  # pragma: no cover - best effort
+        logger.warning("Timeout fetching Firestore runs; falling back to DB history")
+        return None
     except Exception as err:  # pragma: no cover - defensive logging
         logger.warning("Failed to fetch Firestore runs: {}", err)
         return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _fetch_firestore_audit_results(limit: int) -> Optional[List[Dict[str, object]]]:
@@ -484,7 +633,7 @@ def _fetch_firestore_audit_results(limit: int) -> Optional[List[Dict[str, object
     if client is None:
         return None
 
-    try:
+    def _load_audit_results() -> List[Dict[str, object]]:
         docs = (
             client.collection("runs")
             .order_by("timestamp", direction=firestore.Query.DESCENDING)
@@ -497,9 +646,19 @@ def _fetch_firestore_audit_results(limit: int) -> Optional[List[Dict[str, object
             orders = _fetch_orders_for_run(client, doc.id)
             mapped.append(_map_firestore_run_to_audit_result(doc.id, data, orders))
         return mapped
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(_load_audit_results)
+        return future.result(timeout=FIRESTORE_FETCH_TIMEOUT)
+    except TimeoutError:  # pragma: no cover - best effort
+        logger.warning("Timeout fetching Firestore audit results; falling back")
+        return None
     except Exception as err:  # pragma: no cover - defensive logging
         logger.warning("Failed to fetch Firestore audit results: {}", err)
         return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def get_credentials() -> Credentials:
@@ -1174,6 +1333,7 @@ def build_email_content(
             """
             pair_cards_html.append(card_html)
 
+    reconciliation_html = ""
     if reconciliation:
         text_lines.append("Reconciliation Highlights:")
         recon_rows = []
@@ -1184,14 +1344,14 @@ def build_email_content(
             )
             recon_rows.append(
                 f"""
-                <tr>
-                    <td style="padding:8px 12px;border:1px solid #e5e7eb;font-weight:600;">{html.escape(item['agency'])}</td>
-                    <td style="padding:8px 12px;border:1px solid #e5e7eb;">{len(item['pending_signature_orders'])}</td>
-                    <td style="padding:8px 12px;border:1px solid #e5e7eb;">{len(item['signed_without_unsigned_source'])}</td>
-                </tr>
+                    <tr>
+                        <td style=\"padding:10px 12px;border:1px solid #e5e7eb;color:#111827;\">{html.escape(item['agency'])}</td>
+                        <td style=\"padding:10px 12px;border:1px solid #e5e7eb;color:#111827;\">{len(item['pending_signature_orders'])}</td>
+                        <td style=\"padding:10px 12px;border:1px solid #e5e7eb;color:#111827;\">{len(item['signed_without_unsigned_source'])}</td>
+                    </tr>
                 """
             )
-        text_lines.append("")
+
         reconciliation_html = f"""
         <div style="margin-top:18px;">
             <div style="font-size:15px;font-weight:600;color:#111827;margin-bottom:8px;">Reconciliation Highlights</div>
@@ -1209,8 +1369,6 @@ def build_email_content(
             </table>
         </div>
         """
-    else:
-        reconciliation_html = ""
 
     text_lines.append("Automated message generated by the RPA Auditor Bot.")
 
@@ -1566,22 +1724,31 @@ def summary_run(bot_id: str, range_days: int = 7, x_api_key: Optional[str] = Hea
 
 @app.post("/audit-agency-data")
 def audit_agency_data(request: Optional[AuditRequest] = None):
-    # Prefer Firestore-sourced runs (new pipeline). Fall back to legacy Drive audit if Firestore unavailable.
-    firestore_results = _fetch_firestore_audit_results(limit=50)
-    if firestore_results is not None and len(firestore_results) > 0:
+    # Strictly require Firestore data; no Drive fallback
+    try:
+        get_firestore_or_503()
+    except HTTPException:
+        firestore_results = []
+    else:
+        firestore_results = _fetch_firestore_audit_results(limit=50) or []
+
+    # If Firestore is slow/empty, return an empty payload instead of 503 so the UI can still render.
+    if len(firestore_results) == 0:
         return {
             "status": "success",
             "audit_timestamp": datetime.utcnow().isoformat(),
-            "audit_results": firestore_results,
+            "audit_results": [],
             "paired_results": [],
             "reconciliation_summary": [],
         }
 
-    # Legacy behavior: trigger Drive-based audit only if a folder_id is provided
-    folder_id = (request.folder_id if request else None) or "14us_-8r7FHA3VeVSAhcxgbmcrh7vG8EZ"
-    if not folder_id:
-        raise HTTPException(status_code=400, detail="No folder ID provided.")
-    return run_audit(folder_id)
+    return {
+        "status": "success",
+        "audit_timestamp": datetime.utcnow().isoformat(),
+        "audit_results": firestore_results,
+        "paired_results": [],
+        "reconciliation_summary": [],
+    }
 
 
 @app.post("/batch-audit")
@@ -1621,27 +1788,114 @@ def drive_files(folder_id: str):
     }
 
 
-@app.get("/audit-history")
-def audit_history(limit: int = 25):
-    # New behavior: try Firestore first (live bot runs), fall back to persisted batches/DB history
-    firestore_history = _fetch_firestore_history(limit)
-    if firestore_history is not None and len(firestore_history) > 0:
-        return {"status": "success", "history": firestore_history}
+def _parse_date(date_str: Optional[str]) -> Optional[datetime]:
+    if not date_str:
+        return None
+    try:
+        return datetime.fromisoformat(date_str)
+    except Exception:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d")
+        except Exception:
+            return None
 
-    # Prefer full batch summaries if available, otherwise fall back to individual runs (or return both?)
-    batches = history_repository.fetch_recent_batches(limit)
-    if batches:
-        return {"status": "success", "history": batches}
-    
-    # Fallback to old behavior if no batches found (e.g. old data)
-    return {"status": "success", "history": history_repository.fetch_recent(limit)}
+
+def _filter_history(
+    history: List[Dict[str, object]],
+    start: Optional[datetime],
+    end: Optional[datetime],
+    agency: Optional[str],
+    bot_type: Optional[str],
+) -> List[Dict[str, object]]:
+    def _ts(entry: Dict[str, object]) -> Optional[datetime]:
+        raw = entry.get("audit_timestamp") or entry.get("timestamp") or entry.get("date")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    agency_lower = agency.lower() if agency else None
+    bot_lower = bot_type.lower() if bot_type else None
+    filtered: List[Dict[str, object]] = []
+    for item in history:
+        ts = _ts(item)
+        if start and (ts is None or ts < start):
+            continue
+        if end and (ts is None or ts > end):
+            continue
+        if agency_lower and item.get("agency", "").lower() != agency_lower:
+            continue
+        if bot_lower:
+            candidate = (item.get("bot_type") or item.get("template_type") or "").lower()
+            if candidate != bot_lower:
+                continue
+        filtered.append(item)
+    return filtered
+
+
+def _aggregate_top_failure_reasons(history: List[Dict[str, object]], limit: int = 5) -> List[Tuple[str, int]]:
+    counts: Dict[str, int] = {}
+
+    def merge_counts(src: Optional[Dict[str, int]]):
+        if not src:
+            return
+        for reason, count in src.items():
+            if not reason:
+                continue
+            counts[reason] = counts.get(reason, 0) + int(count or 0)
+
+    for entry in history:
+        merge_counts(entry.get("failure_reason_counts"))
+        stats = entry.get("stats") or {}
+        merge_counts(stats.get("failure_reason_counts"))
+        for result in entry.get("audit_results") or []:
+            merge_counts(result.get("failure_reason_counts"))
+            res_stats = result.get("stats") or {}
+            merge_counts(res_stats.get("failure_reason_counts"))
+
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
+@app.get("/audit-history")
+def audit_history(
+    limit: int = 25,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    agency: Optional[str] = None,
+    bot_type: Optional[str] = None,
+):
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+
+    firestore_history = _fetch_firestore_history(limit)
+    history_payload: Optional[List[Dict[str, object]]] = None
+    if firestore_history is not None and len(firestore_history) > 0:
+        history_payload = firestore_history
+    else:
+        batches = history_repository.fetch_recent_batches(limit)
+        if batches:
+            history_payload = batches
+        else:
+            history_payload = history_repository.fetch_recent(limit)
+
+    history_payload = history_payload or []
+    filtered_history = _filter_history(history_payload, start, end, agency, bot_type)
+    top_failure_reasons = _aggregate_top_failure_reasons(filtered_history)
+
+    return {"status": "success", "history": filtered_history, "top_failure_reasons": top_failure_reasons}
 
 
 @app.get("/healthz")
 def healthz():
     db_ok = check_database()
     drive_ok, drive_detail = check_drive_health()
+    creds_health = check_credentials_health()
+    creds_ok = all(entry.get("status") == "ok" for entry in creds_health.values()) if creds_health else True
     overall_status = "ok" if db_ok and drive_ok else "degraded"
+    if not creds_ok:
+        overall_status = "degraded"
 
     database_status = {"status": "ok" if db_ok else "error"}
     drive_status = {"status": "ok" if drive_ok else "error"}
@@ -1655,7 +1909,20 @@ def healthz():
         "checks": {
             "database": database_status,
             "drive": drive_status,
+            "credentials": creds_health,
         },
+    }
+
+
+@app.get("/credentials-health")
+def credentials_health():
+    """Lightweight credential health endpoint for UI badges/alerts."""
+    health = check_credentials_health()
+    overall_ok = all(entry.get("status") == "ok" for entry in health.values()) if health else True
+    return {
+        "status": "ok" if overall_ok else "degraded",
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": health,
     }
 
 # Mount the frontend static files

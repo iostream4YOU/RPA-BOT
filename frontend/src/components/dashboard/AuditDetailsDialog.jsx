@@ -29,6 +29,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 const FailureReasonItem = ({ reason, count, details }) => {
   const [expanded, setExpanded] = React.useState(false);
   const hasDetails = details && details.length > 0;
+  const previewIds = hasDetails ? details.slice(0, 3) : [];
 
   return (
     <div className="rounded-md bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 overflow-hidden transition-all">
@@ -47,6 +48,18 @@ const FailureReasonItem = ({ reason, count, details }) => {
         </div>
       </div>
       
+      {hasDetails && !expanded && previewIds.length > 0 && (
+        <div className="px-3 pb-3 text-xs text-slate-500 dark:text-slate-400 flex flex-wrap gap-2">
+          <span className="font-semibold">Examples:</span>
+          {previewIds.map((id, idx) => (
+            <Badge key={idx} variant="outline" className="font-mono text-[10px] bg-slate-50 text-slate-600 border-slate-200">
+              {id}
+            </Badge>
+          ))}
+          {details.length > previewIds.length && <span>+{details.length - previewIds.length} more</span>}
+        </div>
+      )}
+
       {expanded && hasDetails && (
         <div className="p-3 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 animate-in slide-in-from-top-1 duration-200">
           <div className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">Affected Identifiers (Row / Order ID)</div>
@@ -225,6 +238,73 @@ export default function AuditDetailsDialog({ audit, open, onOpenChange }) {
                         </div>
                       )}
 
+                      {/* Failed order identifiers */}
+                      {(() => {
+                        const orders = Array.isArray(result.orders) && result.orders.length > 0
+                          ? result.orders
+                          : Array.isArray(details.orders)
+                            ? details.orders
+                            : [];
+                        const failedOrders = [];
+                        // Prefer explicit orders array with non-success statuses
+                        if (orders.length > 0) {
+                          orders.forEach((order) => {
+                            const status = (order.status || '').toLowerCase();
+                            if (status && status !== 'success' && status !== 'signed') {
+                              failedOrders.push({
+                                id: order.order_id || order.id || 'unknown',
+                                reason: order.reason || order.remark || '—',
+                                status: order.status || 'failed',
+                              });
+                            }
+                          });
+                        }
+
+                        // Fallback: derive from failure_details map if orders array is absent
+                        if (failedOrders.length === 0 && result.stats?.failure_details) {
+                          Object.entries(result.stats.failure_details).forEach(([reason, ids]) => {
+                            (ids || []).forEach((oid) => {
+                              failedOrders.push({ id: oid, reason, status: 'failed' });
+                            });
+                          });
+                        }
+
+                        if (!failedOrders.length) return null;
+
+                        return (
+                          <div className="mt-8">
+                            <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                              <FileText className="w-4 h-4 text-rose-500" />
+                              Failed Orders
+                            </h4>
+                            <div className="overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+                              <div className="grid grid-cols-12 bg-slate-50 dark:bg-slate-900/50 text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wide">
+                                <div className="col-span-3 px-3 py-2">Order ID</div>
+                                <div className="col-span-2 px-3 py-2">Status</div>
+                                <div className="col-span-7 px-3 py-2">Reason</div>
+                              </div>
+                              <div className="max-h-[240px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
+                                {failedOrders.map((order, idx) => (
+                                  <div key={`${order.id}-${idx}`} className="grid grid-cols-12 text-sm px-3 py-2 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                                    <div className="col-span-3 font-mono text-xs text-slate-700 dark:text-slate-300 truncate" title={order.id}>
+                                      {order.id}
+                                    </div>
+                                    <div className="col-span-2">
+                                      <Badge variant={order.status.toLowerCase() === 'success' || order.status.toLowerCase() === 'signed' ? 'success' : 'destructive'}>
+                                        {order.status || 'failed'}
+                                      </Badge>
+                                    </div>
+                                    <div className="col-span-7 text-slate-700 dark:text-slate-200 truncate" title={order.reason}>
+                                      {order.reason || '—'}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {!result.stats?.failure_reason_counts?.length && (result.unique_failure_reasons?.length || result.stats?.unique_failure_reasons?.length) && (
                         <div className="mt-6">
                           <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
@@ -241,8 +321,17 @@ export default function AuditDetailsDialog({ audit, open, onOpenChange }) {
                         </div>
                       )}
 
-                      {result.orders && result.orders.length > 0 && (
-                        <div className="mt-8">
+                      {(() => {
+                        const orders = (result.orders && result.orders.length > 0)
+                          ? result.orders
+                          : Array.isArray(details.orders)
+                            ? details.orders
+                            : [];
+
+                        if (!orders.length) return null;
+
+                        return (
+                          <div className="mt-8">
                           <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
                             <FileText className="w-4 h-4 text-indigo-500" />
                             Orders Breakdown (from Firestore)
@@ -254,7 +343,7 @@ export default function AuditDetailsDialog({ audit, open, onOpenChange }) {
                               <div className="col-span-7 px-3 py-2">Reason / Remark</div>
                             </div>
                             <div className="max-h-[240px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 bg-white dark:bg-slate-900">
-                              {result.orders.map((order, idx) => {
+                              {orders.map((order, idx) => {
                                 const status = (order.status || '').toString();
                                 const reason = order.reason || order.remark || '—';
                                 return (
@@ -276,7 +365,8 @@ export default function AuditDetailsDialog({ audit, open, onOpenChange }) {
                             </div>
                           </div>
                         </div>
-                      )}
+                        );
+                      })()}
                     </CardContent>
                   </Card>
                 ))}

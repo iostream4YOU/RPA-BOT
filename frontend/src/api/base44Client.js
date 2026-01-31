@@ -2,7 +2,7 @@
 const extractMetadata = (record) => {
   let agency = record.agency;
   let ehr = record.ehr;
-  let remarks = record.error_message;
+  let remarks = record.error_message || record.remark;
 
   // If top-level fields are missing, try to find them in audit_results
   if ((!agency || agency === "Unknown") && record.audit_results && record.audit_results.length > 0) {
@@ -24,28 +24,108 @@ const extractMetadata = (record) => {
   };
 };
 
+const deriveDate = (record) => {
+  return record.audit_timestamp || record.timestamp || record.created_at || record.date || record.run_date;
+};
+
+const collectFailureCounts = (record) => {
+  const counts = { ...(record.failure_reason_counts || {}) };
+
+  const mergeCounts = (source) => {
+    if (!source) return;
+    Object.entries(source).forEach(([reason, count]) => {
+      if (!reason) return;
+      counts[reason] = (counts[reason] || 0) + (count || 0);
+    });
+  };
+
+  mergeCounts(record.stats?.failure_reason_counts);
+
+  (record.audit_results || []).forEach(result => {
+    mergeCounts(result.stats?.failure_reason_counts);
+  });
+
+  return counts;
+};
+
+const deriveCommonFailureReason = (record) => {
+  const counts = collectFailureCounts(record);
+  const sorted = Object.entries(counts).sort((a, b) => (b[1] || 0) - (a[1] || 0));
+  if (sorted.length > 0) return sorted[0][0];
+
+  const reasonsFromResults = (record.audit_results || [])
+    .flatMap(r => r.unique_failure_reasons || r.stats?.unique_failure_reasons || []);
+  if (reasonsFromResults.length > 0) return reasonsFromResults[0];
+
+  const reasons = record.unique_failure_reasons || record.failure_reasons || [];
+  if (reasons.length > 0) return reasons[0];
+
+  return record.error_message || record.remark || "—";
+};
+
 // Aggregate success/failure counts from an audit record
 const extractCounts = (record) => {
   const auditResults = record.audit_results || [];
   if (auditResults.length > 0) {
     const successCount = auditResults.reduce((acc, curr) => acc + (curr.stats?.success_count || 0), 0);
     const failureCount = auditResults.reduce((acc, curr) => acc + (curr.stats?.failure_count || 0), 0);
-    return { successCount, failureCount };
+    const totalRows = auditResults.reduce((acc, curr) => acc + (curr.stats?.total_rows || 0), 0) || successCount + failureCount;
+    return { successCount, failureCount, totalRows };
   }
 
   if (record.stats) {
-    return {
-      successCount: record.stats.success_count || 0,
-      failureCount: record.stats.failure_count || 0,
-    };
+    const successCount = record.stats.success_count || record.stats.signed_count || 0;
+    const failureCount = record.stats.failure_count || record.stats.unsigned_count || 0;
+    const totalRows = record.stats.total_rows || record.orders_total || successCount + failureCount;
+    return { successCount, failureCount, totalRows };
   }
 
-  return { successCount: 0, failureCount: 0 };
+  const successCount = record.orders_processed || 0;
+  const totalRows = record.orders_total || successCount;
+  const failureCount = Math.max(totalRows - successCount, 0);
+  return { successCount, failureCount, totalRows };
+};
+
+const deriveStatusAndRates = (record, counts) => {
+  const totalRows = counts.totalRows || (counts.successCount + counts.failureCount);
+  const successRate = totalRows ? Math.round((counts.successCount / totalRows) * 100) : Math.round(record.success_rate || 0);
+  const failureRate = totalRows ? Math.round((counts.failureCount / totalRows) * 100) : Math.round(record.failure_rate || 0);
+
+  const rawStatus = (record.status || "").toLowerCase();
+  const computedStatus = totalRows === 0
+    ? "Pending"
+    : (counts.failureCount > counts.successCount ? "Failed" : "Success");
+
+  if (rawStatus === "success") return { status: "Success", successRate, failureRate };
+  if (rawStatus === "failed") {
+    const hasMostlySuccess = counts.successCount >= counts.failureCount && counts.successCount > 0;
+    return { status: hasMostlySuccess ? "Success" : "Failed", successRate, failureRate };
+  }
+
+  return { status: computedStatus, successRate, failureRate };
+};
+
+const buildQueryString = (params = {}) => {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === "" || value === "all") return;
+    search.append(key, value);
+  });
+  return search.toString();
 };
 
 export const base44Client = {
+  _baseUrl() {
+    const envUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
+    if (envUrl) return envUrl.replace(/\/$/, '');
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      return window.location.origin.replace(/\/$/, '');
+    }
+    return '';
+  },
+
   refreshAuditData: async () => {
-    const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
+    const backendUrl = base44Client._baseUrl();
     const response = await fetch(
       `${backendUrl.replace(/\/$/, '')}/audit-agency-data`,
       {
@@ -61,12 +141,13 @@ export const base44Client = {
     return response.json();
   },
 
-  getDashboardData: async () => {
+  getDashboardData: async (filters = {}) => {
     try {
       // Add timestamp to prevent caching
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
+      const backendUrl = base44Client._baseUrl();
+      const query = buildQueryString(filters);
       const response = await fetch(
-        `${backendUrl.replace(/\/$/, '')}/audit-history?limit=100&t=${Date.now()}`,
+        `${backendUrl.replace(/\/$/, '')}/audit-history?limit=100&t=${Date.now()}${query ? `&${query}` : ''}`,
         {
           headers: {
             'ngrok-skip-browser-warning': 'true'
@@ -84,75 +165,55 @@ export const base44Client = {
       }
       history = history || [];
       
-      // Calculate stats
-      const totalAudits = history.length;
-      const successCount = history.filter(r => r.status === 'success').length;
-      const failedCount = history.filter(r => r.status === 'failed').length;
-      
       // Sort history by timestamp descending to ensure we get the true latest
       const sortedHistory = [...history].sort((a, b) => {
-        const dateA = new Date(a.audit_timestamp || a.created_at || a.date || 0);
-        const dateB = new Date(b.audit_timestamp || b.created_at || b.date || 0);
+        const dateA = new Date(deriveDate(a) || 0);
+        const dateB = new Date(deriveDate(b) || 0);
         return dateB - dateA;
       });
 
-      let latestAudit = sortedHistory[0] || null;
-      let latestStats = null;
-
-      if (latestAudit) {
-        // If the history record is missing detailed results, try to fetch the full details
-        // Only attempt if we have an ID and missing results
-        if ((!latestAudit.audit_results || latestAudit.audit_results.length === 0) && latestAudit.id) {
-          try {
-            // Attempt to fetch details for this specific audit
-            const detailResponse = await fetch(`${backendUrl}/audit-history/${latestAudit.id}`);
-            if (detailResponse.ok) {
-              const detailData = await detailResponse.json();
-              // If the detail endpoint returns the full object, merge it into the existing record
-              // This ensures the "Recent Audits" list also gets the details
-              if (detailData && (detailData.audit_results || detailData.reconciliation_summary)) {
-                Object.assign(latestAudit, detailData);
-              }
-            }
-          } catch (err) {
-            console.warn("Could not fetch details for latest audit:", err);
-          }
-        }
-
-        // Try to extract meaningful stats from the complex JSON structure
-        const recSummary = latestAudit.reconciliation_summary?.[0] || {};
-        const auditResults = latestAudit.audit_results || [];
-        
-        // Calculate aggregate stats for the latest run
-        let totalRows = 0;
-        let failureCount = 0;
-        let successCountLatest = 0;
-
-        if (auditResults.length > 0) {
-          totalRows = auditResults.reduce((acc, curr) => acc + (curr.stats?.total_rows || 0), 0);
-          failureCount = auditResults.reduce((acc, curr) => acc + (curr.stats?.failure_count || 0), 0);
-          successCountLatest = auditResults.reduce((acc, curr) => acc + (curr.stats?.success_count || 0), 0);
-        } else if (latestAudit.reconciliation_summary) {
-           // Fallback to reconciliation summary if audit_results are missing
-           latestAudit.reconciliation_summary.forEach(rec => {
-             totalRows += (rec.signed_total || 0) + (rec.unsigned_total || 0);
-             // We can't easily determine success/failure count from just totals without more data, 
-             // but we can try to infer or leave as 0 to avoid misleading data.
-             // However, the user's JSON shows 'success_rate' in stats, so audit_results is preferred.
-           });
-        }
-        
-        const meta = extractMetadata(latestAudit);
-        latestStats = {
+      const normalized = sortedHistory.map(record => {
+        const meta = extractMetadata(record);
+        const counts = extractCounts(record);
+        const statusData = deriveStatusAndRates(record, counts);
+        const failureReasons = (record.audit_results || []).flatMap(r => r.unique_failure_reasons || r.stats?.unique_failure_reasons || []);
+        const totalRows = counts.totalRows || (counts.successCount + counts.failureCount);
+        const botType = record.bot_type || record.template_type || record.details?.bot_type || "mixed";
+        return {
+          id: record.id || Math.random().toString(36).substr(2, 9),
           agency: meta.agency,
-          timestamp: latestAudit.audit_timestamp || latestAudit.created_at || latestAudit.date,
+          ehr: meta.ehr,
+          botType,
+          status: statusData.status,
+          date: deriveDate(record),
+          successCount: counts.successCount,
+          failureCount: counts.failureCount,
+          successRate: statusData.successRate,
+          failureRate: statusData.failureRate,
           totalRows,
-          successCount: successCountLatest,
-          failureCount,
-          successRate: totalRows ? Math.round((successCountLatest / totalRows) * 100) : 0,
-          failureReasons: auditResults.flatMap(r => r.unique_failure_reasons || []).slice(0, 5) // Top 5 reasons
+          commonFailureReason: deriveCommonFailureReason(record),
+          failureReasons,
+          remarks: meta.remarks,
+          details: record // Pass the full record for the details view
         };
-      }
+      });
+
+      const totalAudits = normalized.length;
+      const successCount = normalized.filter(r => r.status === 'Success').length;
+      const failedCount = normalized.filter(r => r.status === 'Failed').length;
+
+      const latestAudit = normalized[0];
+      const latestStats = latestAudit
+        ? {
+            agency: latestAudit.agency,
+            timestamp: latestAudit.date,
+            totalRows: latestAudit.totalRows,
+            successCount: latestAudit.successCount,
+            failureCount: latestAudit.failureCount,
+            successRate: latestAudit.successRate,
+            failureReasons: latestAudit.failureReasons?.slice(0, 5) || []
+          }
+        : null;
 
       return {
         stats: {
@@ -162,31 +223,19 @@ export const base44Client = {
           avgTime: "1.2s" // Mock for now
         },
         latestAudit: latestStats,
-        recentAudits: sortedHistory.map(record => {
-          const meta = extractMetadata(record);
-          const counts = extractCounts(record);
-          return {
-            id: record.id || Math.random().toString(36).substr(2, 9),
-            agency: meta.agency,
-            ehr: meta.ehr,
-            status: record.status === 'success' ? 'Success' : 'Failed',
-            date: record.audit_timestamp || record.created_at || record.date,
-            successCount: counts.successCount,
-            failureCount: counts.failureCount,
-            remarks: meta.remarks,
-            details: record // Pass the full record for the details view
-          };
-        })
+        recentAudits: normalized,
+        topFailureReasons: data.top_failure_reasons || []
       };
     } catch (error) {
       console.error("Failed to fetch dashboard data:", error);
       throw error;
     }
   },
-  getAuditLogs: async () => {
+  getAuditLogs: async (filters = {}) => {
     try {
-      const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
-      const response = await fetch(`${backendUrl}/audit-history?limit=1000&t=${Date.now()}`);
+      const backendUrl = base44Client._baseUrl();
+      const query = buildQueryString(filters);
+      const response = await fetch(`${backendUrl}/audit-history?limit=1000&t=${Date.now()}${query ? `&${query}` : ''}`);
       if (!response.ok) throw new Error('Network response was not ok');
       const data = await response.json();
       
@@ -199,14 +248,22 @@ export const base44Client = {
       return history.map(record => {
         const meta = extractMetadata(record);
         const counts = extractCounts(record);
+        const statusData = deriveStatusAndRates(record, counts);
+        const failureReasons = (record.audit_results || []).flatMap(r => r.unique_failure_reasons || r.stats?.unique_failure_reasons || []);
         return {
           id: record.id || Math.random().toString(36).substr(2, 9),
           agency: meta.agency,
           ehr: meta.ehr,
-          status: record.status === 'success' ? 'Success' : 'Failed',
-          date: record.audit_timestamp,
+          botType: record.bot_type || record.template_type || record.details?.bot_type || "mixed",
+          status: statusData.status,
+          date: deriveDate(record),
           successCount: counts.successCount,
           failureCount: counts.failureCount,
+          successRate: statusData.successRate,
+          failureRate: statusData.failureRate,
+          totalRows: counts.totalRows || (counts.successCount + counts.failureCount),
+          commonFailureReason: deriveCommonFailureReason(record),
+          failureReasons,
           remarks: meta.remarks,
           details: record // Pass the full record for the details view
         };
@@ -215,5 +272,14 @@ export const base44Client = {
       console.error("Failed to fetch audit logs:", error);
       throw error;
     }
+  },
+
+  getCredentialHealth: async () => {
+    const backendUrl = base44Client._baseUrl();
+    const response = await fetch(`${backendUrl}/credentials-health?t=${Date.now()}`, {
+      headers: { 'ngrok-skip-browser-warning': 'true' }
+    });
+    if (!response.ok) throw new Error('Failed to fetch credentials health');
+    return response.json();
   }
 };

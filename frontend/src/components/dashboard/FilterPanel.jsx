@@ -70,6 +70,21 @@ export default function FilterPanel({ filters, setFilters, onClearFilters }) {
           </Select>
 
           <Select 
+            value={filters.botType} 
+            onValueChange={(val) => setFilters(prev => ({ ...prev, botType: val }))}
+          >
+            <SelectTrigger className="w-[140px]">
+              <SelectValue placeholder="Bot Type" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Bot Types</SelectItem>
+              <SelectItem value="signed">Signed</SelectItem>
+              <SelectItem value="unsigned">Unsigned</SelectItem>
+              <SelectItem value="mixed">Mixed</SelectItem>
+            </SelectContent>
+          </Select>
+
+          <Select 
             value={filters.agency} 
             onValueChange={(val) => setFilters(prev => ({ ...prev, agency: val }))}
           >
@@ -97,13 +112,18 @@ export default function FilterPanel({ filters, setFilters, onClearFilters }) {
                 {filters.date ? format(filters.date, "PPP") : <span>Pick a date</span>}
               </Button>
             </PopoverTrigger>
-            <PopoverContent className="w-auto p-0" align="start">
+            <PopoverContent className="w-auto p-0 z-50" align="start">
               <Calendar
                 mode="single"
                 selected={filters.date}
                 onSelect={(date) => setFilters(prev => ({ ...prev, date }))}
                 initialFocus
               />
+              <div className="flex justify-end p-2">
+                <Button variant="ghost" size="sm" onClick={() => setFilters(prev => ({ ...prev, date: null }))}>
+                  Clear date
+                </Button>
+              </div>
             </PopoverContent>
           </Popover>
 

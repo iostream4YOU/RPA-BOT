@@ -48,11 +48,13 @@ export default function AuditTable({ data }) {
             <TableHead className="w-[100px]">Audit ID</TableHead>
             <TableHead>Agency</TableHead>
             <TableHead>EHR System</TableHead>
+            <TableHead>Bot Type</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Date</TableHead>
             <TableHead>Success</TableHead>
             <TableHead>Failure</TableHead>
             <TableHead>Remarks</TableHead>
+            <TableHead>Common Failure Reason</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
@@ -62,6 +64,11 @@ export default function AuditTable({ data }) {
               <TableCell className="font-medium">{audit.id}</TableCell>
               <TableCell>{audit.agency}</TableCell>
               <TableCell>{audit.ehr}</TableCell>
+              <TableCell>
+                <Badge variant="secondary" className="capitalize">
+                  {audit.botType || 'mixed'}
+                </Badge>
+              </TableCell>
               <TableCell>
                 <Badge 
                   variant={
@@ -82,6 +89,9 @@ export default function AuditTable({ data }) {
               <TableCell>{audit.failureCount ?? 0}</TableCell>
               <TableCell className="max-w-[220px] truncate" title={audit.remarks || audit.details?.error_message}>
                 {audit.remarks || audit.details?.error_message || '—'}
+              </TableCell>
+              <TableCell className="max-w-[240px] truncate" title={audit.commonFailureReason}>
+                {audit.commonFailureReason || '—'}
               </TableCell>
               <TableCell className="text-right">
                 <DropdownMenu>
