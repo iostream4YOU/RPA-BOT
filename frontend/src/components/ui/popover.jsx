@@ -1,44 +1,33 @@
-import * as React from "react"
-import { cn } from "@/lib/utils"
+import * as React from "react";
+import * as PopoverPrimitive from "@radix-ui/react-popover";
+import { cn } from "@/lib/utils";
 
-const PopoverContext = React.createContext({})
+const Popover = PopoverPrimitive.Root;
 
-const Popover = ({ children }) => {
-  const [open, setOpen] = React.useState(false)
-  return (
-    <PopoverContext.Provider value={{ open, setOpen }}>
-      <div className="relative inline-block text-left">{children}</div>
-    </PopoverContext.Provider>
+const PopoverTrigger = PopoverPrimitive.Trigger;
+
+const PopoverContent = React.forwardRef(
+  ({ className, align = "center", sideOffset = 4, ...props }, ref) => (
+    <PopoverPrimitive.Portal>
+      <PopoverPrimitive.Content
+        ref={ref}
+        align={align}
+        sideOffset={sideOffset}
+        className={cn(
+          "z-50 w-72 rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none",
+          "data-[state=open]:animate-in data-[state=closed]:animate-out",
+          "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+          "data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          "data-[side=bottom]:slide-in-from-top-2 data-[side=top]:slide-in-from-bottom-2",
+          "data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2",
+          "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800",
+          className
+        )}
+        {...props}
+      />
+    </PopoverPrimitive.Portal>
   )
-}
+);
+PopoverContent.displayName = PopoverPrimitive.Content.displayName;
 
-const PopoverTrigger = React.forwardRef(({ asChild, children, ...props }, ref) => {
-  const { open, setOpen } = React.useContext(PopoverContext)
-  const Comp = asChild ? React.Slot : "button" // Simplified, assuming asChild means we clone element or just render children with click handler
-  // Since I don't have Slot, I'll just wrap children in a div if asChild is true, or just attach onClick to the child if possible.
-  // For simplicity, I'll ignore asChild and just render a div wrapper that handles click.
-  return (
-    <div onClick={() => setOpen(!open)} className="inline-block cursor-pointer">
-      {children}
-    </div>
-  )
-})
-PopoverTrigger.displayName = "PopoverTrigger"
-
-const PopoverContent = React.forwardRef(({ className, align = "center", sideOffset = 4, ...props }, ref) => {
-  const { open } = React.useContext(PopoverContext)
-  if (!open) return null
-  return (
-    <div
-      ref={ref}
-      className={cn(
-        "absolute z-50 w-72 rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none animate-in fade-in-80 bg-white",
-        className
-      )}
-      {...props}
-    />
-  )
-})
-PopoverContent.displayName = "PopoverContent"
-
-export { Popover, PopoverTrigger, PopoverContent }
+export { Popover, PopoverTrigger, PopoverContent };

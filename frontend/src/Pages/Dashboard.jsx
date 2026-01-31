@@ -39,6 +39,9 @@ export default function Dashboard() {
     queryKey: ['dashboardData', queryParams],
     queryFn: () => base44Client.getDashboardData(queryParams),
     refetchInterval: 30000, // Real-time refresh every 30s
+    keepPreviousData: true, // avoid empty/loading flicker on filter change
+    placeholderData: (prev) => prev, // show last data while new fetch resolves
+    refetchOnWindowFocus: false,
   });
 
   const { data: credsHealth } = useQuery({

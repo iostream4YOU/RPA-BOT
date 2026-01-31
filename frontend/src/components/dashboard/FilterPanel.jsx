@@ -116,6 +116,9 @@ export default function FilterPanel({ filters, setFilters, onClearFilters }) {
               <Calendar
                 mode="single"
                 selected={filters.date}
+                captionLayout="dropdown"
+                fromYear={2018}
+                toYear={new Date().getFullYear() + 2}
                 onSelect={(date) => setFilters(prev => ({ ...prev, date }))}
                 initialFocus
               />
