@@ -11,7 +11,7 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { startOfDay, endOfDay, isWithinInterval } from 'date-fns';
+import { startOfDay, endOfDay, isWithinInterval, subDays } from 'date-fns';
 
 export default function Dashboard() {
   const [filters, setFilters] = useState({
@@ -32,8 +32,12 @@ export default function Dashboard() {
     }
     if (filters.agency && filters.agency !== 'all') params.agency = filters.agency;
     if (filters.botType && filters.botType !== 'all') params.bot_type = filters.botType;
+    if (filters.dateRange) {
+      params.start_date = filters.dateRange.start;
+      params.end_date = filters.dateRange.end;
+    }
     return params;
-  }, [filters.date, filters.agency, filters.botType]);
+  }, [filters.date, filters.agency, filters.botType, filters.dateRange]);
 
   const { data, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['dashboardData', queryParams],
@@ -105,24 +109,36 @@ export default function Dashboard() {
     };
   }, [filteredAudits, data]);
 
-  const latestAudit = React.useMemo(() => {
+  const overallSummary = React.useMemo(() => {
     if (!filteredAudits.length) return null;
-    const sorted = [...filteredAudits].sort((a, b) => new Date(b.date) - new Date(a.date));
-    const top = sorted[0];
-    const successRate = top.totalRows
-      ? Math.round(((top.successCount || 0) / top.totalRows) * 100)
-      : (top.successRate ?? 0);
-    const failureReasons = top.details?.audit_results
-      ? top.details.audit_results.flatMap(r => r.unique_failure_reasons || [])
-      : top.failureReasons || [];
+
+    const successCount = filteredAudits.reduce((acc, a) => acc + (a.successCount || 0), 0);
+    const failureCount = filteredAudits.reduce((acc, a) => acc + (a.failureCount || 0), 0);
+    const totalRows = successCount + failureCount;
+    const successRate = totalRows ? Math.round((successCount / totalRows) * 100) : 0;
+
+    const failureReasons = filteredAudits.flatMap(a => {
+      if (a.details?.audit_results) {
+        return a.details.audit_results.flatMap(r => r.unique_failure_reasons || []);
+      }
+      return a.failureReasons || [];
+    });
+
+    const dates = filteredAudits
+      .map(a => (a.date ? new Date(a.date) : null))
+      .filter(Boolean)
+      .sort((a, b) => a - b);
+    const rangeLabel = dates.length
+      ? `${startOfDay(dates[0]).toLocaleDateString()} — ${endOfDay(dates[dates.length - 1]).toLocaleDateString()}`
+      : 'Across current filters';
+
     return {
-      agency: top.agency,
-      timestamp: top.date,
-      totalRows: top.successCount + top.failureCount,
-      successCount: top.successCount,
-      failureCount: top.failureCount,
-      successRate: successRate,
+      totalRows,
+      successCount,
+      failureCount,
+      successRate,
       failureReasons,
+      rangeLabel,
     };
   }, [filteredAudits]);
 
@@ -149,6 +165,12 @@ export default function Dashboard() {
   return (
     <Layout currentPageName="Dashboard">
       <div className="p-6 max-w-[1600px] mx-auto space-y-6">
+        <FilterPanel 
+          filters={filters} 
+          setFilters={setFilters}
+          onClearFilters={() => setFilters({ search: '', status: 'all', ehr: 'all', agency: 'all', botType: 'all', date: null })}
+        />
+
         <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-600 via-purple-600 to-slate-900 text-white shadow-lg">
           <div className="absolute inset-0 opacity-20 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.25),transparent_35%),radial-gradient(circle_at_80%_0%,rgba(255,255,255,0.15),transparent_25%)]" />
           <div className="relative p-6 md:p-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
@@ -206,7 +228,7 @@ export default function Dashboard() {
         )}
 
         <KPICards stats={derivedStats} />
-        {latestAudit && <LatestAuditSummary audit={latestAudit} />}
+        {overallSummary && <LatestAuditSummary audit={overallSummary} variant="overall" />}
         <AnalyticsCharts audits={filteredAudits} />
 
         <div className="space-y-4">
@@ -217,12 +239,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <FilterPanel 
-            filters={filters} 
-            setFilters={setFilters}
-            onClearFilters={() => setFilters({ search: '', status: 'all', ehr: 'all', agency: 'all', botType: 'all', date: null })}
-          />
-          
           <AuditTable data={filteredAudits} />
         </div>
       </div>

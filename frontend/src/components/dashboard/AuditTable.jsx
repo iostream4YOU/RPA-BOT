@@ -49,7 +49,6 @@ export default function AuditTable({ data }) {
             <TableHead>Agency</TableHead>
             <TableHead>EHR System</TableHead>
             <TableHead>Bot Type</TableHead>
-            <TableHead>Status</TableHead>
             <TableHead>Date</TableHead>
             <TableHead>Success</TableHead>
             <TableHead>Failure</TableHead>
@@ -67,19 +66,6 @@ export default function AuditTable({ data }) {
               <TableCell>
                 <Badge variant="secondary" className="capitalize">
                   {audit.botType || 'mixed'}
-                </Badge>
-              </TableCell>
-              <TableCell>
-                <Badge 
-                  variant={
-                    audit.status === 'Success' ? 'success' : 
-                    audit.status === 'Failed' ? 'destructive' : 'secondary'
-                  }
-                  className="flex w-fit items-center gap-1"
-                >
-                  {audit.status === 'Success' && <CheckCircle2 className="w-3 h-3" />}
-                  {audit.status === 'Failed' && <AlertCircle className="w-3 h-3" />}
-                  {audit.status}
                 </Badge>
               </TableCell>
               <TableCell>

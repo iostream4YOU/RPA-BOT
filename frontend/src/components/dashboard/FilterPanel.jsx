@@ -38,7 +38,7 @@ export default function FilterPanel({ filters, setFilters, onClearFilters }) {
           />
         </div>
         
-        <div className="flex gap-2 overflow-x-auto pb-2 md:pb-0">
+        <div className="flex gap-2 overflow-x-auto pb-2 md:pb-0 items-center">
           <Select 
             value={filters.status} 
             onValueChange={(val) => setFilters(prev => ({ ...prev, status: val }))}
@@ -129,6 +129,30 @@ export default function FilterPanel({ filters, setFilters, onClearFilters }) {
               </div>
             </PopoverContent>
           </Popover>
+
+          <Button
+            variant="outline"
+            className="whitespace-nowrap"
+            onClick={() => {
+              const end = new Date();
+              const start = subDays(end, 29);
+              setFilters(prev => ({ ...prev, date: null, dateRange: { start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10) } }));
+            }}
+          >
+            Last 30 days
+          </Button>
+
+          <Button
+            variant="outline"
+            className="whitespace-nowrap"
+            onClick={() => {
+              const end = new Date();
+              const start = subDays(end, 89);
+              setFilters(prev => ({ ...prev, date: null, dateRange: { start: start.toISOString().slice(0,10), end: end.toISOString().slice(0,10) } }));
+            }}
+          >
+            Last 90 days
+          </Button>
 
           <Button 
             variant="ghost" 

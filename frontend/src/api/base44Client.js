@@ -147,7 +147,7 @@ export const base44Client = {
       const backendUrl = base44Client._baseUrl();
       const query = buildQueryString(filters);
       const response = await fetch(
-        `${backendUrl.replace(/\/$/, '')}/audit-history?limit=100&t=${Date.now()}${query ? `&${query}` : ''}`,
+        `${backendUrl.replace(/\/$/, '')}/audit-history?limit=500&t=${Date.now()}${query ? `&${query}` : ''}`,
         {
           headers: {
             'ngrok-skip-browser-warning': 'true'

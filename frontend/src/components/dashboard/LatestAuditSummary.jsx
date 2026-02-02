@@ -5,8 +5,22 @@ import { Progress } from '@/components/ui/progress';
 import { AlertTriangle, CheckCircle2, FileText, Clock } from 'lucide-react';
 import { format } from 'date-fns';
 
-export default function LatestAuditSummary({ audit }) {
+export default function LatestAuditSummary({ audit, variant = 'latest' }) {
   if (!audit) return null;
+
+  const isOverall = variant === 'overall';
+  const badgeLabel = isOverall ? 'Overall (filtered)' : 'Latest Audit';
+  const subtitle = isOverall
+    ? audit.rangeLabel || 'Across current filters'
+    : audit.timestamp
+      ? format(new Date(audit.timestamp), 'MMM dd, yyyy HH:mm:ss')
+      : 'Just now';
+  const title = isOverall
+    ? 'Aggregate Processing Summary'
+    : `${audit.agency} Processing Summary`;
+  const description = isOverall
+    ? 'Success / failure across all filtered audits.'
+    : 'Real-time snapshot of the most recent document processing batch.';
 
   return (
     <Card className="mb-6 border-l-4 border-l-indigo-500 shadow-md">
@@ -15,18 +29,18 @@ export default function LatestAuditSummary({ audit }) {
           <div>
             <div className="flex items-center gap-2 mb-1">
               <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
-                Latest Audit
+                {badgeLabel}
               </Badge>
               <span className="text-xs text-muted-foreground flex items-center gap-1">
                 <Clock className="w-3 h-3" />
-                {audit.timestamp ? format(new Date(audit.timestamp), 'MMM dd, yyyy HH:mm:ss') : 'Just now'}
+                {subtitle}
               </span>
             </div>
             <CardTitle className="text-xl">
-              {audit.agency} Processing Summary
+              {title}
             </CardTitle>
             <CardDescription>
-              Real-time snapshot of the most recent document processing batch.
+              {description}
             </CardDescription>
           </div>
           <div className="text-right">
