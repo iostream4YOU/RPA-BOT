@@ -47,11 +47,14 @@ export default function AnalyticsCharts({ audits }) {
         return isSameDay(auditDate, date);
       });
 
+      const successOrders = dayAudits.reduce((acc, a) => acc + (a.successCount || 0), 0);
+      const failedOrders = dayAudits.reduce((acc, a) => acc + (a.failureCount || 0), 0);
+
       return {
         date: format(date, 'MMM dd'),
-        success: dayAudits.filter(a => a.status === 'Success').length,
-        failed: dayAudits.filter(a => a.status === 'Failed').length,
-        total: dayAudits.length
+        success: successOrders,
+        failed: failedOrders,
+        total: successOrders + failedOrders
       };
     });
 

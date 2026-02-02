@@ -5,37 +5,33 @@ import { Activity, CheckCircle2, XCircle, Clock, TrendingUp, TrendingDown } from
 export default function KPICards({ stats }) {
   const cards = [
     {
-      title: "Total Audits",
-      value: stats.totalAudits,
-      change: "+12% from last week",
-      trend: "up",
+      title: "Total Orders",
+      value: stats.totalOrders ?? 0,
+      sub: "Across current filters",
       icon: Activity,
       color: "text-blue-600",
       bg: "bg-blue-50 dark:bg-blue-900/20"
     },
     {
-      title: "Success Rate",
-      value: `${stats.successRate}%`,
-      change: "+2.4% improvement",
-      trend: "up",
+      title: "Success Orders",
+      value: stats.successOrders ?? 0,
+      sub: "Processed successfully",
       icon: CheckCircle2,
       color: "text-green-600",
       bg: "bg-green-50 dark:bg-green-900/20"
     },
     {
-      title: "Failed Audits",
-      value: stats.failedAudits,
-      change: "-5% reduction",
-      trend: "down", // Good thing
+      title: "Failed Orders",
+      value: stats.failureOrders ?? 0,
+      sub: "Require attention",
       icon: XCircle,
       color: "text-red-600",
       bg: "bg-red-50 dark:bg-red-900/20"
     },
     {
-      title: "Avg Processing Time",
-      value: stats.avgTime,
-      change: "~1.2s faster",
-      trend: "up",
+      title: "Success Rate",
+      value: `${stats.successRate ?? 0}%`,
+      sub: "Rate of processed orders",
       icon: Clock,
       color: "text-purple-600",
       bg: "bg-purple-50 dark:bg-purple-900/20"
@@ -57,14 +53,7 @@ export default function KPICards({ stats }) {
           <CardContent>
             <div className="text-2xl font-bold">{card.value}</div>
             <p className="text-xs text-muted-foreground flex items-center mt-1">
-              {card.trend === 'up' ? (
-                <TrendingUp className="w-3 h-3 mr-1 text-green-500" />
-              ) : (
-                <TrendingDown className="w-3 h-3 mr-1 text-green-500" />
-              )}
-              <span className={card.trend === 'up' ? 'text-green-600' : 'text-green-600'}>
-                {card.change}
-              </span>
+              {card.sub}
             </p>
           </CardContent>
         </Card>

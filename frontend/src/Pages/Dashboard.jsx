@@ -9,9 +9,8 @@ import FilterPanel from '@/components/dashboard/FilterPanel';
 import { base44Client } from '@/api/base44Client';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { startOfDay, endOfDay, isWithinInterval, subDays } from 'date-fns';
+import { startOfDay, endOfDay, isWithinInterval } from 'date-fns';
 
 export default function Dashboard() {
   const [filters, setFilters] = useState({
@@ -46,12 +45,6 @@ export default function Dashboard() {
     keepPreviousData: true, // avoid empty/loading flicker on filter change
     placeholderData: (prev) => prev, // show last data while new fetch resolves
     refetchOnWindowFocus: false,
-  });
-
-  const { data: credsHealth } = useQuery({
-    queryKey: ['credentialsHealth'],
-    queryFn: base44Client.getCredentialHealth,
-    refetchInterval: 60000,
   });
 
   const refreshMutation = useMutation({
@@ -95,16 +88,15 @@ export default function Dashboard() {
 
   const derivedStats = React.useMemo(() => {
     const audits = filteredAudits;
-    const totalAudits = audits.length;
     const successSum = audits.reduce((acc, a) => acc + (a.successCount || 0), 0);
     const failureSum = audits.reduce((acc, a) => acc + (a.failureCount || 0), 0);
     const totalRows = successSum + failureSum;
     const successRate = totalRows ? Math.round((successSum / totalRows) * 100) : 0;
-    const failedAudits = audits.filter(a => a.status.toLowerCase() === 'failed').length;
     return {
-      totalAudits,
+      totalOrders: totalRows,
+      successOrders: successSum,
+      failureOrders: failureSum,
       successRate,
-      failedAudits,
       avgTime: data?.stats?.avgTime || '~',
     };
   }, [filteredAudits, data]);
@@ -202,30 +194,6 @@ export default function Dashboard() {
             </div>
           ) : null}
         </div>
-
-        {credsHealth && (
-          <Card className="border border-slate-200 dark:border-slate-800 shadow-sm">
-            <CardHeader className="pb-2 flex flex-row items-center justify-between">
-              <CardTitle className="text-sm">Credential Health</CardTitle>
-              <Badge variant={credsHealth.status === 'ok' ? 'success' : 'destructive'}>
-                {credsHealth.status === 'ok' ? 'Healthy' : 'Attention needed'}
-              </Badge>
-            </CardHeader>
-            <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {Object.entries(credsHealth.checks || {}).map(([key, val]) => (
-                <div key={key} className="flex items-center justify-between rounded-lg border border-slate-100 dark:border-slate-800 px-3 py-2 bg-slate-50/60 dark:bg-slate-900/60">
-                  <span className="text-sm text-slate-600 dark:text-slate-300 capitalize">{key.replace(/_/g, ' ')}</span>
-                  <Badge variant={val.status === 'ok' ? 'success' : val.status === 'degraded' ? 'secondary' : 'destructive'}>
-                    {val.status}
-                  </Badge>
-                </div>
-              ))}
-              {!credsHealth.checks && (
-                <div className="text-sm text-slate-500">No credential data available</div>
-              )}
-            </CardContent>
-          </Card>
-        )}
 
         <KPICards stats={derivedStats} />
         {overallSummary && <LatestAuditSummary audit={overallSummary} variant="overall" />}
