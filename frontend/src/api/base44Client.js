@@ -129,7 +129,13 @@ export const base44Client = {
   async _fetchAuditHistoryPayload({ limit = 100, filters = {}, include_orders = false } = {}) {
     // Prefer Firestore direct when configured (bypasses backend cold starts).
     if (firestoreDirect.isEnabled()) {
-      return firestoreDirect.getAuditHistory({ limit, includeOrders: include_orders });
+      try {
+        return await firestoreDirect.getAuditHistory({ limit, includeOrders: include_orders });
+      } catch (err) {
+        // Common when Firestore rules don't allow browser reads for runs/orders.
+        // Fall back to backend (service-account) so the UI still works.
+        console.warn('Direct Firestore read failed; falling back to backend API.', err);
+      }
     }
 
     const backendUrl = base44Client._baseUrl();
@@ -292,7 +298,11 @@ export const base44Client = {
     if (!runId) throw new Error('runId is required');
 
     if (firestoreDirect.isEnabled()) {
-      return firestoreDirect.getAuditDetail(runId);
+      try {
+        return await firestoreDirect.getAuditDetail(runId);
+      } catch (err) {
+        console.warn('Direct Firestore detail read failed; falling back to backend API.', err);
+      }
     }
 
     const backendUrl = base44Client._baseUrl();
