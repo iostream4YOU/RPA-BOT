@@ -7,6 +7,7 @@ import { base44Client } from '@/api/base44Client';
 import { Loader2, Download, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { startOfDay, endOfDay, isWithinInterval } from 'date-fns';
+import { clearTtlCache, readTtlCache, writeTtlCache } from '@/lib/ttlCache';
 
 export default function AuditLogs() {
   const [filters, setFilters] = useState({
@@ -30,11 +31,31 @@ export default function AuditLogs() {
     return params;
   }, [filters.date, filters.agency, filters.botType]);
 
+  const AUDITLOGS_TTL_MS = 24 * 60 * 60 * 1000;
+  const cacheKey = useMemo(() => `rpa.auditLogs.v1:${JSON.stringify(queryParams)}`,
+    [queryParams]
+  );
+
   const { data: audits, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['auditLogs', queryParams],
-    queryFn: () => base44Client.getAuditLogs(queryParams),
-    refetchInterval: 30000,
+    queryFn: async () => {
+      const cached = readTtlCache(cacheKey, AUDITLOGS_TTL_MS);
+      if (cached) return cached;
+      const fresh = await base44Client.getAuditLogs(queryParams);
+      writeTtlCache(cacheKey, fresh);
+      return fresh;
+    },
+    staleTime: AUDITLOGS_TTL_MS,
+    gcTime: AUDITLOGS_TTL_MS * 2,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
+
+  const forceRefresh = async () => {
+    clearTtlCache(cacheKey);
+    return refetch();
+  };
 
   const filteredAudits = useMemo(() => {
     if (!audits) return [];
@@ -131,7 +152,7 @@ export default function AuditLogs() {
           <div className="flex gap-2">
             <Button 
               variant="outline" 
-              onClick={() => refetch()}
+              onClick={() => forceRefresh()}
               disabled={isRefetching}
             >
               <RefreshCw className={`mr-2 h-4 w-4 ${isRefetching ? 'animate-spin' : ''}`} />

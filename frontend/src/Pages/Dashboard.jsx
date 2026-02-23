@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import Layout from '@/Layout';
 import KPICards from '@/components/dashboard/KPICards';
 import LatestAuditSummary from '@/components/dashboard/LatestAuditSummary';
@@ -11,6 +11,7 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { startOfDay, endOfDay, isWithinInterval } from 'date-fns';
+import { clearTtlCache, readTtlCache, writeTtlCache } from '@/lib/ttlCache';
 
 export default function Dashboard() {
   const [filters, setFilters] = useState({
@@ -38,19 +39,34 @@ export default function Dashboard() {
     return params;
   }, [filters.date, filters.agency, filters.botType, filters.dateRange]);
 
+  // Cache dashboard payload for 24 hours to avoid repeated requests.
+  const DASHBOARD_TTL_MS = 24 * 60 * 60 * 1000;
+  const cacheKey = React.useMemo(() => `rpa.dashboard.v1:${JSON.stringify(queryParams)}`,
+    [queryParams]
+  );
+
   const { data, isLoading, error, refetch, isRefetching } = useQuery({
     queryKey: ['dashboardData', queryParams],
-    queryFn: () => base44Client.getDashboardData(queryParams),
-    refetchInterval: 30000, // Real-time refresh every 30s
-    keepPreviousData: true, // avoid empty/loading flicker on filter change
-    placeholderData: (prev) => prev, // show last data while new fetch resolves
+    queryFn: async () => {
+      const cached = readTtlCache(cacheKey, DASHBOARD_TTL_MS);
+      if (cached) return cached;
+      const fresh = await base44Client.getDashboardData(queryParams);
+      writeTtlCache(cacheKey, fresh);
+      return fresh;
+    },
+    staleTime: DASHBOARD_TTL_MS,
+    gcTime: DASHBOARD_TTL_MS * 2,
+    refetchInterval: false,
     refetchOnWindowFocus: false,
+    refetchOnMount: false,
+    keepPreviousData: true,
+    placeholderData: (prev) => prev,
   });
 
-  const refreshMutation = useMutation({
-    mutationFn: base44Client.refreshAuditData,
-    onSuccess: () => refetch(),
-  });
+  const forceRefresh = async () => {
+    clearTtlCache(cacheKey);
+    return refetch();
+  };
 
   const filteredAudits = React.useMemo(() => {
     const audits = data?.recentAudits || [];
@@ -176,11 +192,11 @@ export default function Dashboard() {
                 variant="secondary"
                 size="sm"
                 className="bg-white/10 backdrop-blur border border-white/20 hover:bg-white/20"
-                onClick={() => refreshMutation.mutate()}
-                disabled={isRefetching || refreshMutation.isLoading}
+                onClick={() => forceRefresh()}
+                disabled={isRefetching}
               >
-                <RefreshCw className={`mr-2 h-4 w-4 ${(isRefetching || refreshMutation.isLoading) ? 'animate-spin' : ''}`} />
-                {(isRefetching || refreshMutation.isLoading) ? 'Refreshing...' : 'Refresh'}
+                <RefreshCw className={`mr-2 h-4 w-4 ${isRefetching ? 'animate-spin' : ''}`} />
+                {isRefetching ? 'Refreshing...' : 'Refresh'}
               </Button>
             </div>
           </div>
