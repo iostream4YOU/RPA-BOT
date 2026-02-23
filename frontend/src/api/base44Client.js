@@ -114,6 +114,8 @@ const buildQueryString = (params = {}) => {
   return search.toString();
 };
 
+import { firestoreDirect } from './firestoreDirect';
+
 export const base44Client = {
   _baseUrl() {
     const envUrl = (import.meta.env.VITE_BACKEND_URL || '').trim();
@@ -122,6 +124,26 @@ export const base44Client = {
       return window.location.origin.replace(/\/$/, '');
     }
     return '';
+  },
+
+  async _fetchAuditHistoryPayload({ limit = 100, filters = {}, include_orders = false } = {}) {
+    // Prefer Firestore direct when configured (bypasses backend cold starts).
+    if (firestoreDirect.isEnabled()) {
+      return firestoreDirect.getAuditHistory({ limit, includeOrders: include_orders });
+    }
+
+    const backendUrl = base44Client._baseUrl();
+    const query = buildQueryString({ ...filters, include_orders });
+    const response = await fetch(
+      `${backendUrl.replace(/\/$/, '')}/audit-history?limit=${encodeURIComponent(limit)}&t=${Date.now()}${query ? `&${query}` : ''}`,
+      {
+        headers: {
+          'ngrok-skip-browser-warning': 'true'
+        }
+      }
+    );
+    if (!response.ok) throw new Error('Network response was not ok');
+    return response.json();
   },
 
   refreshAuditData: async () => {
@@ -143,19 +165,11 @@ export const base44Client = {
 
   getDashboardData: async (filters = {}) => {
     try {
-      // Add timestamp to prevent caching
-      const backendUrl = base44Client._baseUrl();
-      const query = buildQueryString(filters);
-      const response = await fetch(
-        `${backendUrl.replace(/\/$/, '')}/audit-history?limit=500&t=${Date.now()}${query ? `&${query}` : ''}`,
-        {
-          headers: {
-            'ngrok-skip-browser-warning': 'true'
-          }
-        }
-      );
-      if (!response.ok) throw new Error('Network response was not ok');
-      const data = await response.json();
+      const data = await base44Client._fetchAuditHistoryPayload({
+        limit: 100,
+        filters,
+        include_orders: false,
+      });
       
       // Handle different response structures
       let history = data.history;
@@ -233,11 +247,11 @@ export const base44Client = {
   },
   getAuditLogs: async (filters = {}) => {
     try {
-      const backendUrl = base44Client._baseUrl();
-      const query = buildQueryString(filters);
-      const response = await fetch(`${backendUrl}/audit-history?limit=1000&t=${Date.now()}${query ? `&${query}` : ''}`);
-      if (!response.ok) throw new Error('Network response was not ok');
-      const data = await response.json();
+      const data = await base44Client._fetchAuditHistoryPayload({
+        limit: 200,
+        filters,
+        include_orders: false,
+      });
       
       let history = data.history;
       if (!history && (data.audit_results || data.status)) {
@@ -272,6 +286,24 @@ export const base44Client = {
       console.error("Failed to fetch audit logs:", error);
       throw error;
     }
+  },
+
+  getAuditDetail: async (runId) => {
+    if (!runId) throw new Error('runId is required');
+
+    if (firestoreDirect.isEnabled()) {
+      return firestoreDirect.getAuditDetail(runId);
+    }
+
+    const backendUrl = base44Client._baseUrl();
+    const response = await fetch(`${backendUrl}/audit-history/${encodeURIComponent(runId)}?t=${Date.now()}`, {
+      headers: {
+        'ngrok-skip-browser-warning': 'true'
+      }
+    });
+    if (!response.ok) throw new Error('Failed to fetch audit details');
+    const payload = await response.json();
+    return payload?.record || null;
   },
 
   getCredentialHealth: async () => {

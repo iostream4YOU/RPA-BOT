@@ -594,7 +594,7 @@ def _fetch_orders_for_run(client: firestore.Client, run_id: str) -> List[Dict[st
         return []
 
 
-def _fetch_firestore_history(limit: int) -> Optional[List[Dict[str, object]]]:
+def _fetch_firestore_history(limit: int, include_orders: bool = False) -> Optional[List[Dict[str, object]]]:
     """Return recent runs from Firestore or None if unavailable."""
     client = init_firestore()
     if client is None:
@@ -610,7 +610,7 @@ def _fetch_firestore_history(limit: int) -> Optional[List[Dict[str, object]]]:
         history: List[Dict[str, object]] = []
         for doc in docs:
             data = doc.to_dict() or {}
-            orders = _fetch_orders_for_run(client, doc.id)
+            orders = _fetch_orders_for_run(client, doc.id) if include_orders else None
             history.append(_map_firestore_run_to_history(doc.id, data, orders))
         return history
 
@@ -1866,11 +1866,15 @@ def audit_history(
     end_date: Optional[str] = None,
     agency: Optional[str] = None,
     bot_type: Optional[str] = None,
+    include_orders: bool = False,
 ):
+    # Protect the API from very large scans on initial dashboard loads.
+    limit = max(1, min(limit, 200))
+
     start = _parse_date(start_date)
     end = _parse_date(end_date)
 
-    firestore_history = _fetch_firestore_history(limit)
+    firestore_history = _fetch_firestore_history(limit, include_orders=include_orders)
     history_payload: Optional[List[Dict[str, object]]] = None
     if firestore_history is not None and len(firestore_history) > 0:
         history_payload = firestore_history
@@ -1886,6 +1890,24 @@ def audit_history(
     top_failure_reasons = _aggregate_top_failure_reasons(filtered_history)
 
     return {"status": "success", "history": filtered_history, "top_failure_reasons": top_failure_reasons}
+
+
+@app.get("/audit-history/{run_id}")
+def audit_history_detail(run_id: str):
+    """Fetch one run with full order details (used by details dialog)."""
+    client = init_firestore()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Firestore is not configured or credentials missing.")
+
+    doc = client.collection("runs").document(run_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    data = doc.to_dict() or {}
+    orders = _fetch_orders_for_run(client, run_id)
+    record = _map_firestore_run_to_history(run_id, data, orders)
+
+    return {"status": "success", "record": record}
 
 
 @app.get("/healthz")

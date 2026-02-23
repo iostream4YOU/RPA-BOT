@@ -20,16 +20,35 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { format } from 'date-fns';
 import AuditDetailsDialog from './AuditDetailsDialog';
+import { base44Client } from '@/api/base44Client';
 
 export default function AuditTable({ data }) {
   const [selectedAudit, setSelectedAudit] = useState(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [loadingDetailsId, setLoadingDetailsId] = useState(null);
 
-  const handleViewDetails = (audit) => {
+  const handleViewDetails = async (audit) => {
     setSelectedAudit(audit);
-    // Add a small delay to ensure the dropdown closes completely
-    // before the dialog opens. This prevents focus trapping issues.
-    setTimeout(() => setIsDialogOpen(true), 100);
+    setLoadingDetailsId(audit.id);
+
+    try {
+      const detailedRecord = await base44Client.getAuditDetail(audit.id);
+      if (detailedRecord) {
+        setSelectedAudit(prev => ({
+          ...(prev || audit),
+          details: detailedRecord,
+          remarks: detailedRecord.error_message || prev?.remarks || audit.remarks,
+          commonFailureReason: prev?.commonFailureReason || audit.commonFailureReason,
+        }));
+      }
+    } catch (error) {
+      console.warn('Failed to load detailed audit payload, opening with summary data only.', error);
+    } finally {
+      setLoadingDetailsId(null);
+      // Add a small delay to ensure the dropdown closes completely
+      // before the dialog opens. This prevents focus trapping issues.
+      setTimeout(() => setIsDialogOpen(true), 100);
+    }
   };
 
   const handleDialogOpenChange = (open) => {
@@ -90,10 +109,11 @@ export default function AuditTable({ data }) {
                   <DropdownMenuContent align="end">
                     <DropdownMenuLabel>Actions</DropdownMenuLabel>
                     <DropdownMenuItem 
+                      disabled={loadingDetailsId === audit.id}
                       onClick={() => handleViewDetails(audit)}
                     >
                       <FileText className="mr-2 h-4 w-4" />
-                      View Details
+                      {loadingDetailsId === audit.id ? 'Loading Details...' : 'View Details'}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem>Download Report</DropdownMenuItem>
